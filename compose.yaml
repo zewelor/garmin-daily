@@ -1,0 +1,33 @@
+# Disposable local development DB. `just integration` uses a separate project.
+name: garmin-daily-tooling
+
+services:
+  db:
+    # Synthetic credentials for local development and tests only.
+    image: postgres:18@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81
+    environment:
+      POSTGRES_DB: garmin_daily
+      POSTGRES_USER: garmin_daily
+      POSTGRES_PASSWORD: dev-only-password
+    ports:
+      - "127.0.0.1:15432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "garmin_daily", "-d", "garmin_daily"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  app:
+    profiles: [app]
+    image: garmin-daily:local
+    build: .
+    environment:
+      GARMIN_API_KEY: ${GARMIN_API_KEY:-}
+      DATABASE_URL: postgres://garmin_daily:dev-only-password@db:5432/garmin_daily?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]

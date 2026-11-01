@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Lint Dockerfile
+        uses: immanuwell/dockerfile-roast@1c87b2aa189338c24db4acde40864dae8994de8f # v1.7.0
+        with:
+          no-roast: true
+          # Keep the tool image revision in sync with the pinned action release.
+          image-tag: 1.7.0@sha256:4f31be49f26804c0a2f8a0ab0ae578719e30376323e8fd5951c6dcc79a478b40
+
+      - name: Run unit tests
+        run: go test ./...
+
+      - name: Check Go formatting
+        run: |
+          files=$(gofmt -l ./cmd ./garmin)
+          if [ -n "$files" ]; then
+            printf '%s\n' "$files"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Start PostgreSQL
+        run: docker compose --env-file /dev/null -p garmin-daily-integration up --detach --wait db
+
+      - name: Run integration tests
+        env:
+          TEST_DATABASE_URL: postgres://garmin_daily:dev-only-password@localhost:15432/garmin_daily?sslmode=disable
+        run: go test -tags integration -v ./...
+
+      - name: Build container image
+        run: docker build --pull --tag garmin-daily:local .
+
+      - name: Smoke-test container migration
+        run: docker compose --env-file /dev/null -p garmin-daily-integration --profile app run --rm app migrate
+
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker compose --env-file /dev/null -p garmin-daily-integration down --volumes --remove-orphans
