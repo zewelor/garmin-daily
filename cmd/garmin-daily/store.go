@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"garmin-daily/garmin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/zewelor/garmin-daily/garmin"
 )
 
 //go:embed schema.sql

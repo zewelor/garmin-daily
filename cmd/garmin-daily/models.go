@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"garmin-daily/garmin"
+	"github.com/zewelor/garmin-daily/garmin"
 )
 
 type dayData struct {

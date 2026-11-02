@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"garmin-daily/garmin"
+	"github.com/zewelor/garmin-daily/garmin"
 )
 
 func TestClientEndpoints(t *testing.T) {

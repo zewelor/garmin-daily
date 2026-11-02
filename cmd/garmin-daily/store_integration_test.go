@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"garmin-daily/garmin"
+	"github.com/zewelor/garmin-daily/garmin"
 
 	"github.com/jackc/pgx/v5"
 )

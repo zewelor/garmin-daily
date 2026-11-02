@@ -1,4 +1,4 @@
-module garmin-daily
+module github.com/zewelor/garmin-daily
 
 go 1.27.3
 

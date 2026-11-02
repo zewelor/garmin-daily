@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"garmin-daily/garmin"
+	"github.com/zewelor/garmin-daily/garmin"
 )
 
 const healthFixture = `{"data":[{"calendarDate":"2026-10-25","movement":{"steps":{"value":12345,"distanceInMeters":9876.54}},"calories":{"burnedTotal":2456},"heartRate":{"restingValue":51},"bodyBattery":{"maxValue":95}}]}`

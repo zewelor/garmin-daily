@@ -6,8 +6,8 @@ import (
 	"io"
 	"time"
 
-	"garmin-daily/garmin"
 	"github.com/jackc/pgx/v5"
+	"github.com/zewelor/garmin-daily/garmin"
 )
 
 func fetchDay(ctx context.Context, c *garmin.Client, day string) (dayData, error) {

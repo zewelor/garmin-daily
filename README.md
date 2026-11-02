@@ -1,8 +1,8 @@
 # GarminDaily
 
 Minimalny program Go: Garmin Connect Personal API → PostgreSQL, jedno konto
-operatora i jeden rekord na datę w każdej z trzech tabel. Uruchamia synchronizację
-i kończy pracę. Zakres projektu: [MCA-53](https://linear.app/mcagents/issue/MCA-53).
+Garmin i jeden rekord na datę w każdej z trzech tabel. Uruchamia synchronizację
+i kończy pracę. Każde konto wymaga osobnej bazy lub schematu PostgreSQL.
 
 ## Uruchomienie
 
@@ -23,7 +23,7 @@ export DATABASE_URL='postgres://garmin_daily:dev-only-password@localhost:15432/g
 
 ./garmin-daily migrate
 ./garmin-daily sync --from 2026-10-25 --to 2026-10-31
-./garmin-daily sync --last-days 7 --timezone Atlantic/Madeira
+./garmin-daily sync --last-days 7 --timezone UTC
 ```
 
 CLI, synchronizacja i PostgreSQL znajdują się w `cmd/garmin-daily/`.
@@ -50,9 +50,9 @@ w `DATABASE_URL` zgodnie z konfiguracją serwera; `sslmode=disable` powyżej dot
 wyłącznie lokalnej bazy testowej.
 
 Zakres dat wybierasz przez `--from YYYY-MM-DD --to YYYY-MM-DD` (obie granice
-włącznie) albo `--last-days N --timezone Atlantic/Madeira`. Tryb względny pobiera
+włącznie) albo `--last-days N --timezone UTC`. Tryb względny pobiera
 dzisiejszą datę i poprzednie N−1 dat kalendarzowych w podanej strefie; N musi być
-dodatnie. Strefa IANA lub `UTC` jest obowiązkowa w tym trybie; `Local` nie jest
+dodatnie. Strefa IANA (np. `Europe/Warsaw`) lub `UTC` jest obowiązkowa w tym trybie; `Local` nie jest
 akceptowane. Baza stref czasowych jest wbudowana w binarkę. Użyj strefy
 odpowiadającej datom konta Garmin. Trybów nie można łączyć, a `--timezone` bez
 `--last-days` jest błędem. Daty bezwzględne pozostają datami kalendarzowymi Garmina,
@@ -136,6 +136,40 @@ Jeden token na uruchomienie, bez cache, PVC i odświeżania sesji. HTTP ma timeo
 Połączenie i transakcja PostgreSQL mają osobne limity 20 s. SIGINT/SIGTERM
 anuluje I/O. Logi nie zawierają kluczy, tokenów, DSN ani treści odpowiedzi.
 
+## Publiczny obraz GHCR
+
+Obraz: [`ghcr.io/zewelor/garmin-daily`](https://github.com/users/zewelor/packages/container/package/garmin-daily).
+Obsługiwane platformy: `linux/amd64` i `linux/arm64`.
+
+- `latest`: ostatni poprawnie zweryfikowany i opublikowany commit domyślnej gałęzi.
+- `<pełny-SHA-commitu>`: obraz konkretnego commitu. Retencja zachowuje 10 ostatnich
+  wersji z tagami i zawsze chroni `latest`; starsze wersje mogą zostać usunięte.
+- Digest `sha256:…` jest podawany w podsumowaniu zadania publikacji. Przypnij go
+  we wdrożeniu, aby aktualizacja `latest` nie zmieniała uruchamianego kodu.
+
+Ustaw `DATABASE_URL` na bazę osiągalną **z kontenera** i `GARMIN_API_KEY` w środowisku
+powłoki (lub menedżerze sekretów). `localhost` wewnątrz kontenera wskazuje sam
+kontener; do lokalnych prób z PostgreSQL użyj Compose z następnej sekcji.
+
+```sh
+docker pull ghcr.io/zewelor/garmin-daily:latest
+# Migrację wykonaj tylko raz na pustej bazie/schemacie.
+docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --env DATABASE_URL ghcr.io/zewelor/garmin-daily:latest migrate
+docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --env DATABASE_URL --env GARMIN_API_KEY ghcr.io/zewelor/garmin-daily:latest \
+  sync --last-days 7 --timezone UTC
+```
+
+Dobierz strefę do dat swojego konta Garmin. Obraz nie zawiera kluczy API, ustawień
+bazy, danych konta ani plików `.env`. `docker/metadata-action` generuje tagi oraz
+etykiety OCI ze źródłem i rewizją; publikacja używa repozytoryjnego `GITHUB_TOKEN`.
+
+Przy pierwszej publikacji maintainer musi ustawić widoczność **pakietu** na
+`Public` w ustawieniach GHCR; nowy pakiet jest domyślnie prywatny niezależnie od
+widoczności repozytorium. Dopiero anonimowe pobranie manifestu/obrazu potwierdza
+publiczny dostęp. [Dokumentacja GHCR](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
+
 ## Docker i weryfikacja
 
 ```sh
@@ -161,7 +195,7 @@ Testy tworzą i usuwają własne schematy. Można też użyć istniejącej bazy 
 
 Obraz to statyczna binarka i certyfikaty CA w `scratch`, użytkownik 65532.
 Nie potrzebuje zapisu do systemu plików ani uprawnień roota.
-Kontekst budowania dopuszcza wyłącznie pliki programu, modułu i migracji.
+Kontekst budowania dopuszcza wyłącznie pliki programu, modułu, migracji i licencji.
 Docker według [oficjalnego przewodnika początkowego](https://github.com/docker/skills/tree/main/skills/docker-project-foundations),
 z zakresem ograniczonym do tego CLI.
 
@@ -171,49 +205,15 @@ błąd w trzeciej tabeli → wznowienie. Dodatkowy test zrywa połączenie do ba
 w trakcie zapisu trzeciej tabeli i sprawdza rollback oraz wznowienie po połączeniu. Test sprawdza też rzeczywisty brak nowej
 wersji wiersza przy identycznym imporcie i dokładność dziesiętną.
 To test integracyjny z kontrolowanym HTTP; test rzeczywistego Garmina jest
-oddzielną granicą dowodu. Go fuzzing pilotażowo sprawdza zachowanie momentu
-czasu przy dekodowaniu epoch ms. Sekwencje stanów pokrywa test integracyjny;
-oddzielny model stanowy i formalny nie uzasadniają kosztu dla sekwencyjnego CLI.
-Przed znaczącą zmianą kontraktów lub współbieżności należy ocenić te metody ponownie.
+oddzielną granicą dowodu. Go fuzzing sprawdza zachowanie momentu czasu przy dekodowaniu epoch ms.
 
-CI jest wyłącznie weryfikacyjne: nie publikuje obrazów i nie wdraża aplikacji.
+CI sprawdza format Go, `go vet`, testy jednostkowe i integracyjne oraz budowanie
+obrazu i migrację w kontenerze. Pull requesty nie mają uprawnień do publikowania.
+Po przejściu weryfikacji push do domyślnej gałęzi publikuje obraz GHCR;
+`workflow_dispatch` pozwala powtórzyć cały proces z tej gałęzi.
 Renovate używa `.github/renovate.json`, z przeglądem zmian bez automerge.
-Nie instalujemy lokalnych kopii skilli: instrukcje projektu i wybrany starter
-wystarczają dla tego małego programu; katalog `.agents` jest tylko do odczytu.
 
-## Stan i granice odbioru
-
-Opis osobnej zmiany infrastruktury: [GarminDaily w GitOps](docs/gitops.md).
-
-Implementacja i lokalne testy obejmują klienta, migrację i synchronizację zakresu.
-Weryfikacja lokalna 2026-11-01:
-
-- Import rzeczywistego tygodnia: 7 rekordów w każdej tabeli; powtórzenie importu
-  nie zmieniło żadnego rekordu. Niezależne porównanie 259 zachowanych pól z API:
-  brak różnic. Prywatnych odpowiedzi nie zapisano w plikach projektu.
-- PostgreSQL 18.6: 24 KiB stron tabel, 48 KiB indeksów, 96 KiB łącznie przez
-  `pg_total_relation_size` (uwzględnia dodatkowe struktury relacji). Pomiar dla
-  trzech tabel i siedmiu dni, bez instancji PostgreSQL, WAL, replik i backupów;
-  nie jest prognozą liniowego wzrostu.
-- Pierwszy import: szczyt RSS 18320 KiB, wcześniejsze powtórzenie 17924 KiB.
-  Finalna statyczna binarka: 15476 KiB przy ponownym imporcie tygodnia (`/usr/bin/time -f 'peak_rss_kib=%M elapsed_s=%e'`). To pomiar procesu,
-  nie całego kontenera ani bazy; nie ustanawiamy jeszcze budżetu zasobów.
-- Pełne testy integracyjne PostgreSQL i HTTP, `go vet` i 5 s fuzzingu epoch ms
-  przeszły. Reprodukowalne wyjście testów: `go test -tags integration -v ./...`.
-- Docker zbudowany lokalnie; migracja oraz rzeczywista synchronizacja HTTPS
-  z obrazu jako UID 65532 przy systemie plików tylko do odczytu przeszły.
-  Linter Dockerfile: brak ostrzeżeń. Hosted CI nie było uruchomione.
-- Konfiguracja Renovate przeszła oficjalny walidator 44.199.0 jako konfiguracja
-  repozytorium: `renovate-config-validator --strict --no-global .github/renovate.json`.
-  Jednorazowo uruchomiono go na Node 26; instalator ostrzegł, że deklarowanym
-  środowiskiem tej wersji jest Node 24. Działania hostowanego bota nie sprawdzono.
-  Przypięty obraz lintera w parametrze `image-tag` wymaga
-  ręcznego uzgodnienia z aktualizacjami jego Action; standardowy manager Actions
-  nie śledzi tego dowolnego parametru.
-
-Pełna akceptacja MCA-53 nadal wymaga porównania tygodnia z dotychczasowym
-raportem oraz osobnej zaakceptowanej zmiany Grafany/GitOps i kontrolowanego
-cutoveru. Nie wykonano commitu, pushu, publikacji ani zmian w istniejącej infrastrukturze.
+Wskazówki dla harmonogramów i wdrożeń: [uruchamianie cykliczne](docs/gitops.md).
 
 ## Źródła kontraktu
 
@@ -228,3 +228,7 @@ nie obiektem JSON; żądanie tokenu wymaga `Accept: */*` (JSON dawał HTTP 406).
 Oficjalny Swagger opisuje znaczniki snu jako string/date-time, ale jego opis
 mówi o ms, a rzeczywiste odpowiedzi zawierają liczby epoch ms. Implementacja
 obsługuje potwierdzony format liczbowy, bez zgadywania alternatywnych formatów.
+
+## Licencja
+
+[MIT](LICENSE). Kopia licencji znajduje się także w obrazie pod `/LICENSE`.

@@ -13,8 +13,8 @@ import (
 	"time"
 	_ "time/tzdata"
 
-	"garmin-daily/garmin"
 	"github.com/jackc/pgx/v5"
+	"github.com/zewelor/garmin-daily/garmin"
 )
 
 func run(ctx context.Context, args []string, getenv func(string) string, out io.Writer) error {

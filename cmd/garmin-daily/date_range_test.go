@@ -14,19 +14,19 @@ func TestSyncDateFlags(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"rolling", []string{"--last-days", "7", "--timezone", "Atlantic/Madeira"}, "GARMIN_API_KEY is required"},
+		{"rolling", []string{"--last-days", "7", "--timezone", "Europe/London"}, "GARMIN_API_KEY is required"},
 		{"one day", []string{"--last-days", "1", "--timezone", "UTC"}, "GARMIN_API_KEY is required"},
 		{"absolute", []string{"--from", "2026-10-25", "--to", "2026-10-31"}, "GARMIN_API_KEY is required"},
-		{"zero days", []string{"--last-days", "0", "--timezone", "Atlantic/Madeira"}, "--last-days must be positive"},
-		{"negative days", []string{"--last-days", "-1", "--timezone", "Atlantic/Madeira"}, "--last-days must be positive"},
-		{"bad days", []string{"--last-days", "bad", "--timezone", "Atlantic/Madeira"}, `invalid value "bad" for flag -last-days`},
+		{"zero days", []string{"--last-days", "0", "--timezone", "Europe/London"}, "--last-days must be positive"},
+		{"negative days", []string{"--last-days", "-1", "--timezone", "Europe/London"}, "--last-days must be positive"},
+		{"bad days", []string{"--last-days", "bad", "--timezone", "Europe/London"}, `invalid value "bad" for flag -last-days`},
 		{"missing timezone", []string{"--last-days", "7"}, "--timezone is required with --last-days"},
 		{"empty timezone", []string{"--last-days", "7", "--timezone", ""}, "--timezone is required with --last-days"},
 		{"bad timezone", []string{"--last-days", "7", "--timezone", "Atlantic/Unknown"}, "invalid --timezone"},
 		{"host timezone", []string{"--last-days", "7", "--timezone", "Local"}, "invalid --timezone"},
-		{"mixed from", []string{"--last-days", "7", "--timezone", "Atlantic/Madeira", "--from", "2026-10-25"}, "--last-days cannot be combined with --from or --to"},
-		{"mixed to", []string{"--last-days", "7", "--timezone", "Atlantic/Madeira", "--to", "2026-10-31"}, "--last-days cannot be combined with --from or --to"},
-		{"mixed empty from", []string{"--last-days", "7", "--timezone", "Atlantic/Madeira", "--from", ""}, "--last-days cannot be combined with --from or --to"},
+		{"mixed from", []string{"--last-days", "7", "--timezone", "Europe/London", "--from", "2026-10-25"}, "--last-days cannot be combined with --from or --to"},
+		{"mixed to", []string{"--last-days", "7", "--timezone", "Europe/London", "--to", "2026-10-31"}, "--last-days cannot be combined with --from or --to"},
+		{"mixed empty from", []string{"--last-days", "7", "--timezone", "Europe/London", "--from", ""}, "--last-days cannot be combined with --from or --to"},
 		{"timezone with absolute", []string{"--from", "2026-10-25", "--to", "2026-10-31", "--timezone", "UTC"}, "--timezone requires --last-days"},
 		{"empty timezone with absolute", []string{"--from", "2026-10-25", "--to", "2026-10-31", "--timezone", ""}, "--timezone requires --last-days"},
 		{"missing absolute bound", []string{"--from", "2026-10-25"}, "--from and --to must be valid YYYY-MM-DD dates with from <= to"},
@@ -49,7 +49,7 @@ func TestRecentDaysRange(t *testing.T) {
 		from string
 		to   string
 	}{
-		{"Madeira ahead of UTC date", "2026-07-15T23:30:00Z", 7, "2026-07-10", "2026-07-16"},
+		{"summer timezone ahead of UTC date", "2026-07-15T23:30:00Z", 7, "2026-07-10", "2026-07-16"},
 		{"one day before local midnight", "2026-07-15T22:59:59Z", 1, "2026-07-15", "2026-07-15"},
 		{"one day at local midnight", "2026-07-15T23:00:00Z", 1, "2026-07-16", "2026-07-16"},
 		{"spring DST transition", "2026-03-29T12:00:00Z", 2, "2026-03-28", "2026-03-29"},
@@ -63,7 +63,7 @@ func TestRecentDaysRange(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			from, to, err := recentDaysRange(now, tt.days, "Atlantic/Madeira")
+			from, to, err := recentDaysRange(now, tt.days, "Europe/London")
 			if err != nil {
 				t.Fatal(err)
 			}
