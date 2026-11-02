@@ -88,11 +88,14 @@ process manager to supply it.
 | `migrate` | Create the initial schema in one transaction. Run once on an empty database/schema. |
 | `sync --from YYYY-MM-DD --to YYYY-MM-DD` | Import an inclusive range of Garmin calendar dates. |
 | `sync --last-days N --timezone IANA_ZONE` | Import today and the previous `N−1` dates in the chosen timezone. |
+| `sync --last-days N --timezone IANA_ZONE --exclude-today` | Import yesterday and the previous `N−1` completed dates in the chosen timezone. |
 
 There is no default date range. The two range modes cannot be combined.
 `--last-days` must be positive and requires a named IANA timezone or `UTC`;
-`Local` is rejected. `--timezone` is only valid with `--last-days`. Timezone data
-is embedded in the binary.
+`Local` is rejected. `--timezone` and `--exclude-today` are only valid with an
+explicit `--last-days` range. `--exclude-today` uses local calendar dates, so it
+ends yesterday regardless of the execution time or daylight-saving changes.
+Timezone data is embedded in the binary.
 
 A successful sync exits with code `0` and reports each day:
 

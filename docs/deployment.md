@@ -32,9 +32,18 @@ garmin-daily sync --last-days 3 --timezone Europe/London
 ```
 
 Choose the IANA timezone matching your Garmin account. This imports today and
-the previous two calendar dates. Repeating a rolling window picks up late
-corrections. Choose the window length and schedule for your own use; neither is
-hardcoded in the application.
+the previous two calendar dates. To import three completed dates ending
+yesterday, use:
+
+```sh
+garmin-daily sync --last-days 3 --timezone Europe/London --exclude-today
+```
+
+`--exclude-today` requires an explicit `--last-days` range. It selects yesterday
+and the previous `N−1` calendar dates in the chosen timezone, regardless of the
+execution hour or daylight-saving transitions. Repeating a rolling window picks
+up late corrections. Choose the window length and schedule for your own use;
+neither is hardcoded in the application.
 
 Allow only one writer against the same tables at a time. For Kubernetes, use:
 

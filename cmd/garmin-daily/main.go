@@ -19,7 +19,7 @@ import (
 
 func run(ctx context.Context, args []string, getenv func(string) string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: garmin-daily migrate | sync --from YYYY-MM-DD --to YYYY-MM-DD | sync --last-days N --timezone IANA_ZONE")
+		return fmt.Errorf("usage: garmin-daily migrate | sync --from YYYY-MM-DD --to YYYY-MM-DD | sync --last-days N --timezone IANA_ZONE [--exclude-today]")
 	}
 	command := args[0]
 	if command != "sync" && command != "migrate" {
@@ -29,11 +29,13 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 	flags.SetOutput(out)
 	var from, to, timezone string
 	var lastDays int
+	var excludeToday bool
 	if command == "sync" {
 		flags.StringVar(&from, "from", "", "first Garmin calendar date (inclusive)")
 		flags.StringVar(&to, "to", "", "last Garmin calendar date (inclusive)")
 		flags.IntVar(&lastDays, "last-days", 0, "number of Garmin calendar dates ending today")
 		flags.StringVar(&timezone, "timezone", "", "IANA timezone for --last-days (required)")
+		flags.BoolVar(&excludeToday, "exclude-today", false, "end --last-days on yesterday instead of today")
 	}
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
@@ -43,7 +45,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 	}
 	var start, end time.Time
 	if command == "sync" {
-		var absolute, rolling, zoned bool
+		var absolute, rolling, zoned, excludeTodaySet bool
 		flags.Visit(func(f *flag.Flag) {
 			switch f.Name {
 			case "from", "to":
@@ -52,6 +54,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 				rolling = true
 			case "timezone":
 				zoned = true
+			case "exclude-today":
+				excludeTodaySet = true
 			}
 		})
 		if rolling && absolute {
@@ -60,9 +64,12 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 		if zoned && !rolling {
 			return fmt.Errorf("--timezone requires --last-days")
 		}
+		if excludeTodaySet && !rolling {
+			return fmt.Errorf("--exclude-today requires --last-days")
+		}
 		if rolling {
 			var err error
-			start, end, err = recentDaysRange(time.Now(), lastDays, timezone)
+			start, end, err = recentDaysRange(time.Now(), lastDays, timezone, excludeToday)
 			if err != nil {
 				return err
 			}
@@ -99,7 +106,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 	return syncRange(ctx, c, conn, start, end, out)
 }
 
-func recentDaysRange(now time.Time, days int, timezone string) (time.Time, time.Time, error) {
+func recentDaysRange(now time.Time, days int, timezone string, excludeToday bool) (time.Time, time.Time, error) {
 	if days <= 0 {
 		return time.Time{}, time.Time{}, fmt.Errorf("--last-days must be positive")
 	}
@@ -115,6 +122,9 @@ func recentDaysRange(now time.Time, days int, timezone string) (time.Time, time.
 	}
 	year, month, day := now.In(location).Date()
 	end := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+	if excludeToday {
+		end = end.AddDate(0, 0, -1)
+	}
 	return end.AddDate(0, 0, 1-days), end, nil
 }
 
