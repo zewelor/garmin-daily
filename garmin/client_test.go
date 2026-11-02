@@ -86,3 +86,73 @@ func TestTimeoutAndLongRetryAfter(t *testing.T) {
 		}
 	})
 }
+
+func TestDailySleepNoNightVariant(t *testing.T) {
+	const day = "2026-08-08"
+	const noNightFields = `"calendarDate":null,` +
+		`"sleepStartTimestampGMT":null,"sleepEndTimestampGMT":null,"sleepTimeSeconds":null,` +
+		`"napTimeSeconds":%d,"deepSleepSeconds":null,"lightSleepSeconds":null,"remSleepSeconds":null,` +
+		`"awakeSleepSeconds":null,"unmeasurableSleepSeconds":null,"avgHeartRate":null,"avgSleepStress":null,` +
+		`"averageRespirationValue":null,"averageSpO2Value":null,"sleepScores":{"overall":{"value":null}}`
+	response := func(fields, sleepNeed string) string {
+		return fmt.Sprintf(`{%s,"sleepNeed":%s}`, fields, sleepNeed)
+	}
+	metadata := fmt.Sprintf(`{"calendarDate":%q}`, day)
+	fields := func(nap int32) string { return fmt.Sprintf(noNightFields, nap) }
+
+	for _, tc := range []struct {
+		name string
+		nap  int32
+	}{{"zero", 0}, {"positive", 123}} {
+		t.Run("preserves "+tc.name+" nap", func(t *testing.T) {
+			body := response(fields(tc.nap), metadata)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, body)
+			}))
+			defer server.Close()
+
+			sleep, err := NewClient(server.URL, server.Client()).DailySleep(context.Background(), day)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sleep.Day != day || sleep.Nap == nil || *sleep.Nap != tc.nap {
+				t.Fatalf("day=%q nap=%v, want day=%q nap=%d", sleep.Day, sleep.Nap, day, tc.nap)
+			}
+			if sleep.Start != nil || sleep.End != nil || sleep.Duration != nil || sleep.Deep != nil ||
+				sleep.Light != nil || sleep.REM != nil || sleep.Awake != nil || sleep.Unmeasurable != nil ||
+				sleep.HeartRate != nil || sleep.Stress != nil || sleep.Respiration != nil || sleep.SpO2 != nil ||
+				sleep.Scores.Overall.Value != nil {
+				t.Fatal("absent nightly measurements became populated")
+			}
+		})
+	}
+
+	base := fields(0)
+	withoutRootDate := strings.TrimPrefix(base, `"calendarDate":null,`)
+	wrongRootDate := strings.Replace(base, `"calendarDate":null`, `"calendarDate":"2026-08-07"`, 1)
+	withoutNap := strings.Replace(base, `"napTimeSeconds":0`, `"napTimeSeconds":null`, 1)
+	withDuration := strings.Replace(base, `"sleepTimeSeconds":null`, `"sleepTimeSeconds":1`, 1)
+	withScore := strings.Replace(base, `"value":null`, `"value":75`, 1)
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"missing root date", response(withoutRootDate, metadata)},
+		{"mismatched non-null root date", response(wrongRootDate, metadata)},
+		{"missing metadata date", response(base, `{}`)},
+		{"mismatched metadata date", response(base, `{"calendarDate":"2026-08-07"}`)},
+		{"missing nap marker", response(withoutNap, metadata)},
+		{"nightly measurement with null root date", response(withDuration, metadata)},
+		{"nightly score with null root date", response(withScore, metadata)},
+	} {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, tc.body)
+			}))
+			defer server.Close()
+			if _, err := NewClient(server.URL, server.Client()).DailySleep(context.Background(), day); err == nil {
+				t.Fatal("accepted invalid sleep date variant")
+			}
+		})
+	}
+}

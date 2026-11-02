@@ -34,7 +34,7 @@ their full parent path.
 
 | Table column | Personal API field | Unit or meaning |
 | --- | --- | --- |
-| all tables: `day` | `calendarDate` | Garmin calendar date |
+| all tables: `day` | `calendarDate` | Garmin calendar date; see the no-night sleep exception below |
 | `daily_health.steps` | `movement.steps.value` | steps |
 | `daily_health.distance_m` | `movement.steps.distanceInMeters` | metres |
 | `daily_health.calories_total` | `calories.burnedTotal` | kcal as reported by Garmin |
@@ -100,7 +100,11 @@ limit. Unsupported values fail instead of being clipped or changed to zero.
   value on the next import. Numeric zero remains zero.
 - HTTP 204 for the sleep or HRV endpoint means all measurement columns in that
   table are `NULL` for the health-summary date.
-- An empty or `null` HTTP 200 body, invalid JSON, missing or mismatched
+- A sleep response with explicit `calendarDate: null` is accepted only when
+  `sleepNeed.calendarDate` matches the requested date, `napTimeSeconds` is present,
+  and every modeled nightly measurement is absent. That metadata supplies the
+  date; naps retain their source value, including zero, and nightly fields remain `NULL`.
+- Otherwise, an empty or `null` HTTP 200 body, invalid JSON, missing or mismatched
   `calendarDate`, a missing or duplicate health summary, a missing `hrvSummary`,
   or an invalid measurement aborts that day. Negative measurements are rejected;
   values constrained to 0–100 must also stay within that range. HTTP 404 is an

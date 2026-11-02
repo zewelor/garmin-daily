@@ -143,17 +143,43 @@ func (c *Client) DailySummary(ctx context.Context, day string) (Summary, error) 
 }
 
 // DailySleep returns nil for HTTP 204 (no measurements).
+// A dated sleepNeed can identify a nap-only response with an explicit null date.
 func (c *Client) DailySleep(ctx context.Context, day string) (*Sleep, error) {
-	var result Sleep
+	var result struct {
+		Sleep
+		CalendarDate json.RawMessage `json:"calendarDate"`
+		SleepNeed    struct {
+			CalendarDate string `json:"calendarDate"`
+		} `json:"sleepNeed"`
+	}
 	query := url.Values{"date": {day}}
 	ok, err := c.get(ctx, sleepPath+"?"+query.Encode(), &result, true)
 	if err != nil || !ok {
 		return nil, err
 	}
-	if result.Day != day {
+
+	calendarDate := bytes.TrimSpace(result.CalendarDate)
+	if len(calendarDate) == 0 {
 		return nil, fmt.Errorf("missing or mismatched calendarDate")
 	}
-	return &result, nil
+	if bytes.Equal(calendarDate, []byte("null")) {
+		nightlyMeasurementPresent := result.Start != nil || result.End != nil || result.Duration != nil ||
+			result.Deep != nil || result.Light != nil || result.REM != nil || result.Awake != nil ||
+			result.Unmeasurable != nil || result.HeartRate != nil || result.Stress != nil ||
+			result.Respiration != nil || result.SpO2 != nil || result.Scores.Overall.Value != nil
+		if result.SleepNeed.CalendarDate != day || result.Nap == nil || nightlyMeasurementPresent {
+			return nil, fmt.Errorf("missing or mismatched calendarDate")
+		}
+		result.Day = result.SleepNeed.CalendarDate
+		return &result.Sleep, nil
+	}
+
+	var date string
+	if err := json.Unmarshal(calendarDate, &date); err != nil || date != day {
+		return nil, fmt.Errorf("missing or mismatched calendarDate")
+	}
+	result.Day = date
+	return &result.Sleep, nil
 }
 
 // DailyHRV returns nil for HTTP 204 (no measurements).
