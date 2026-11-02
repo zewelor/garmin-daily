@@ -1,234 +1,190 @@
 # GarminDaily
 
-Minimalny program Go: Garmin Connect Personal API → PostgreSQL, jedno konto
-Garmin i jeden rekord na datę w każdej z trzech tabel. Uruchamia synchronizację
-i kończy pracę. Każde konto wymaga osobnej bazy lub schematu PostgreSQL.
+Sync daily Garmin Connect health, sleep and HRV metrics to PostgreSQL.
 
-## Uruchomienie
+[![CI](https://github.com/zewelor/garmin-daily/actions/workflows/ci.yml/badge.svg)](https://github.com/zewelor/garmin-daily/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/github/go-mod/go-version/zewelor/garmin-daily?logo=go)](go.mod)
+[![GHCR](https://img.shields.io/badge/GHCR-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)](https://github.com/users/zewelor/packages/container/package/garmin-daily)
+[![License](https://img.shields.io/github/license/zewelor/garmin-daily)](LICENSE)
 
-Wymagania: Go zgodne z `go.mod`, PostgreSQL oraz klucz **Personal API** Garmina.
-Docker Compose udostępnia izolowaną bazę do prób; nie jest konfiguracją produkcyjną.
+[Quick start](#quick-start) · [Configuration](#configuration) · [Data model](docs/data-model.md) · [Deployment](docs/deployment.md) · [Development](#development)
 
-```sh
-go build -o garmin-daily ./cmd/garmin-daily
-docker compose --env-file /dev/null up -d --wait db
+GarminDaily is a small, run-once CLI built around the official **Garmin Connect
+Personal API**. It authenticates, imports an explicit date range and exits.
+Run it manually or schedule it with cron, systemd or a Kubernetes CronJob.
 
-# .env jest lokalny, nie jest automatycznie odczytywany przez program.
-# Jeśli już istnieje, uzupełnij go zamiast nadpisywać.
-# Wzór: .env.example. Nigdy nie zapisuj prawdziwego klucza w Git.
-set -a
-. ./.env
-set +a
-export DATABASE_URL='postgres://garmin_daily:dev-only-password@localhost:15432/garmin_daily?sslmode=disable'
+- **Three daily tables** for health, sleep and HRV, with one row per date.
+- **Repeatable imports** that apply corrections and skip unchanged rows.
+- **Atomic daily writes**: a failed day leaves no partial records.
+- **Small container**: a static Go binary, CA certificates and license in
+  `scratch`, running as UID/GID `65532:65532` with no writable filesystem required.
 
-./garmin-daily migrate
-./garmin-daily sync --from 2026-10-25 --to 2026-10-31
-./garmin-daily sync --last-days 7 --timezone UTC
+Each database or schema belongs to **one Garmin account**. The application does
+not manage users, run a web server or store intraday samples.
+
+## Quick start
+
+You need a Garmin **Personal API key** and a reachable PostgreSQL database.
+A Garmin Connect password is not a Personal API key.
+
+### Use the published image
+
+Create a local `.env` file with your own connection details:
+
+```dotenv
+GARMIN_API_KEY=your-personal-api-key
+DATABASE_URL=postgres://USER:PASSWORD@DB_HOST:5432/garmin_daily?sslmode=require
 ```
 
-CLI, synchronizacja i PostgreSQL znajdują się w `cmd/garmin-daily/`.
-Pakiet `garmin/` zawiera niezależnego klienta Personal API i modele odpowiedzi;
-korzysta wyłącznie z biblioteki standardowej Go. Endpointy są zebrane w jego
-`client.go`, a wartości dziesiętne zachowuje jako `json.Number`. Konwersja do
-PostgreSQL pozostaje w aplikacji.
-
-Klienta tworzy się przez `garmin.NewClient(baseURL, httpClient)`, uwierzytelnia
-przez `Authenticate(ctx, key)`, a dane pobiera przez `DailySummary`, `DailySleep`
-i `DailyHRV`. Dla snu i HRV odpowiedź HTTP 204 zwraca `nil, nil`.
-Wywołania przyjmują datę `YYYY-MM-DD`; klient nie odczytuje środowiska ani plików.
-Przekazany `http.Client` określa timeout i politykę przekierowań. Klient przechowuje
-jeden token w pamięci i jest używany sekwencyjnie.
-
-`migrate` uruchamia początkową migrację `cmd/garmin-daily/schema.sql` w jednej transakcji, **raz**
-na wybranej bazie/schemacie. Ponowne uruchomienie zgłasza błąd istniejących tabel.
-Nie ma automatycznego migrowania przy synchronizacji ani frameworka migracji.
-Kolejna zmiana schematu wymaga jawnej migracji.
-
-`GARMIN_API_KEY` jest wymagany wyłącznie dla `sync`; `DATABASE_URL` dla obu poleceń.
-Nie przekazuj sekretów jako argumentów CLI. Dla zdalnej bazy skonfiguruj TLS
-w `DATABASE_URL` zgodnie z konfiguracją serwera; `sslmode=disable` powyżej dotyczy
-wyłącznie lokalnej bazy testowej.
-
-Zakres dat wybierasz przez `--from YYYY-MM-DD --to YYYY-MM-DD` (obie granice
-włącznie) albo `--last-days N --timezone UTC`. Tryb względny pobiera
-dzisiejszą datę i poprzednie N−1 dat kalendarzowych w podanej strefie; N musi być
-dodatnie. Strefa IANA (np. `Europe/Warsaw`) lub `UTC` jest obowiązkowa w tym trybie; `Local` nie jest
-akceptowane. Baza stref czasowych jest wbudowana w binarkę. Użyj strefy
-odpowiadającej datom konta Garmin. Trybów nie można łączyć, a `--timezone` bez
-`--last-days` jest błędem. Daty bezwzględne pozostają datami kalendarzowymi Garmina,
-bez przeliczania na dzień serwera. Powtórzenie zakresu pobiera korekty; nie ma
-domyślnego zakresu. Uruchamiaj jeden proces zapisujący do tych tabel naraz.
-
-Sukces: kod wyjścia 0 i `day=YYYY-MM-DD changed_rows=N` dla każdego zapisanego dnia.
-Błąd: kod 1, opis etapu i zakończenie zakresu na pierwszym błędzie. Dni wcześniej
-zatwierdzone pozostają zapisane; wznowienie polega na powtórzeniu zakresu.
-
-## Kontrakt danych i mały schemat
-
-`daily_health`, `daily_sleep` i `daily_hrv` mają klucz `day DATE`.
-Sen i HRV wskazują kluczem obcym na dzień zdrowia. Nie ma identyfikatorów
-technicznych, kont/użytkowników, metadanych urządzenia, dodatkowych indeksów,
-surowych odpowiedzi, JSONB, próbek intraday ani tabel agregatów 7/30/90 dni.
-Źródłowe średnie Garmina, w tym tygodniowa HRV, są oddzielnymi metrykami API;
-program nie wylicza i nie przechowuje ich kopii z własnych agregacji.
-
-Typy są celowo małe, ale bez obcinania wartości:
-
-- `smallint` (2 bajty): dzienne tętno, minuty intensywności, stres, Body Battery,
-  ocena snu. Wyniki 0–100 mają również ograniczenia `CHECK`.
-- `integer` (4 bajty): kroki, kalorie, sekundy snu i HRV. Zwykły dłuższy sen
-  przekracza 32767 sekund, a API deklaruje HRV jako int32 bez mniejszego limitu.
-- `numeric`: tylko rzeczywiste pola ułamkowe. Dekodowane bez przejścia przez
-  `float64`, zachowują dokładność dziesiętną i notację wykładniczą JSON.
-- `timestamptz`: początek i koniec snu z epoki UTC w milisekundach. Data snu
-  pozostaje datą Garmina; sen przez północ i zmianę czasu nie jest dzielony.
-- `text`: status HRV; bez osobnego słownika dla kilku krótkich wartości.
-
-Nie wprowadzamy sztucznych limitów precyzji `numeric(p,s)` ani węższych typów
-kosztem możliwego przepełnienia. Przekroczenie obsługiwanego zakresu jest błędem,
-nie przycięciem liczby ani zamianą na zero. Rozmiar należy mierzyć na realnym
-zbiorze: narzut stron PostgreSQL dominuje przy kilku rekordach.
-
-Mapowanie zachowanych pól (pola w grupie odpowiadają sobie kolejno):
-
-| Tabela / kolumny | Pole Personal API | Jednostka |
-| --- | --- | --- |
-| każda: `day` | `calendarDate` | data Garmina |
-| health: `steps`, `distance_m` | `movement.steps.value`, `.distanceInMeters` | kroki, metry |
-| health: `calories_total`, `calories_active`, `calories_resting` | `calories.burnedTotal`, `.burnedActive`, `.burnedResting` | kcal zgłoszone przez Garmin |
-| health: `heart_rate_resting`, `heart_rate_min`, `heart_rate_max` | `heartRate.restingValue`, `.minValue`, `.maxValue` | bpm |
-| health: `moderate_minutes`, `vigorous_minutes` | `intensityMinutes.moderate`, `.vigorous` | minuty, bez mnożenia vigorous przez 2 |
-| health: `stress_avg`, `stress_max` | `stress.avgLevel`, `.maxLevel` | 0–100 |
-| health: `body_battery_min`, `body_battery_max`, `body_battery_latest` | `bodyBattery.minValue`, `.maxValue`, `.latestValue` | 0–100 |
-| health: `body_battery_charged`, `body_battery_drained` | `bodyBattery.chargedValue`, `.drainedValue` | punkty, sumy zmian w dniu |
-| sleep: `started_at`, `ended_at` | `sleepStartTimestampGMT`, `sleepEndTimestampGMT` | epoch ms → UTC |
-| sleep: `duration_s`, `nap_s` | `sleepTimeSeconds`, `napTimeSeconds` | sekundy; główny sen nie zawiera drzemek |
-| sleep: `deep_s`, `light_s`, `rem_s`, `awake_s`, `unmeasurable_s` | `deepSleepSeconds`, `lightSleepSeconds`, `remSleepSeconds`, `awakeSleepSeconds`, `unmeasurableSleepSeconds` | sekundy |
-| sleep: `score` | `sleepScores.overall.value` | 0–100 |
-| sleep: `heart_rate_avg`, `stress_avg`, `respiration_avg`, `spo2_avg` | `avgHeartRate`, `avgSleepStress`, `averageRespirationValue`, `averageSpO2Value` | bpm, 0–100, oddechy/min, % |
-| hrv: `night_avg`, `weekly_avg`, `status` | `hrvSummary.lastNightAvg`, `.weeklyAvg`, `.status` | wartości źródła, status |
-| hrv: `baseline_low`, `baseline_high`, `baseline_low_upper` | `hrvSummary.baseline.balancedLow`, `.balancedUpper`, `.lowUpper` | wartości źródła |
-
-Garmin opisuje HRV jako pomiar w milisekundach w
-[materiałach o HRV](https://www.garmin.com/en-SG/blog/general/heart-rate-variability-hrv/).
-Sam schemat Personal API nie przypisuje jednostki tym polom; zapisujemy je bez
-przeliczania. Przed podpisaniem osi dashboardu trzeba potwierdzić ich zgodność
-z dotychczasowym raportem.
-
-### Braki i błędy
-
-Brak pola lub JSON `null` zapisuje SQL `NULL`, również gdy wcześniej była wartość.
-Późniejsze uzupełnienie zastępuje ten brak. Zero pozostaje zerem. Odpowiedź HTTP
-204 dla snu/HRV oznacza cały zestaw pomiarów `NULL` dla dnia podsumowania zdrowia.
-Pusta odpowiedź 200, brak `calendarDate` lub `hrvSummary`, inna data, brak albo
-wielokrotne podsumowanie zdrowia, błędny JSON i ujemne pomiary przerywają dzień.
-Nie zgadujemy znaczenia liczb ujemnych ani HTTP 404.
-
-Najpierw pobierane i walidowane są wszystkie trzy odpowiedzi dnia, następnie
-upserty wykonują się w jednej transakcji. Brak częściowego zapisu dnia.
-`IS DISTINCT FROM` pomija zapis niezmienionego rekordu, także przy `NULL`.
-Brak własnego `updated_at`, który wymuszałby aktualizacje przy każdym imporcie.
-
-Jeden token na uruchomienie, bez cache, PVC i odświeżania sesji. HTTP ma timeout
-20 s i limit odpowiedzi 8 MiB. Dla 429/5xx są maksymalnie trzy próby;
-`Retry-After` jest respektowany do 30 s, dłuższy kończy uruchomienie z błędem.
-401, pozostałe błędy HTTP, awarie sieci i timeout nie są ponawiane.
-Połączenie i transakcja PostgreSQL mają osobne limity 20 s. SIGINT/SIGTERM
-anuluje I/O. Logi nie zawierają kluczy, tokenów, DSN ani treści odpowiedzi.
-
-## Publiczny obraz GHCR
-
-Obraz: [`ghcr.io/zewelor/garmin-daily`](https://github.com/users/zewelor/packages/container/package/garmin-daily).
-Obsługiwane platformy: `linux/amd64` i `linux/arm64`.
-
-- `latest`: ostatni poprawnie zweryfikowany i opublikowany commit domyślnej gałęzi.
-- `<pełny-SHA-commitu>`: obraz konkretnego commitu. Retencja zachowuje 10 ostatnich
-  wersji z tagami i zawsze chroni `latest`; starsze wersje mogą zostać usunięte.
-- Digest `sha256:…` jest podawany w podsumowaniu zadania publikacji. Przypnij go
-  we wdrożeniu, aby aktualizacja `latest` nie zmieniała uruchamianego kodu.
-
-Ustaw `DATABASE_URL` na bazę osiągalną **z kontenera** i `GARMIN_API_KEY` w środowisku
-powłoki (lub menedżerze sekretów). `localhost` wewnątrz kontenera wskazuje sam
-kontener; do lokalnych prób z PostgreSQL użyj Compose z następnej sekcji.
+Match TLS settings to your database server. `DB_HOST` must be reachable from the
+container: `localhost` refers to the container itself. Keep `.env` out of Git.
 
 ```sh
 docker pull ghcr.io/zewelor/garmin-daily:latest
-# Migrację wykonaj tylko raz na pustej bazie/schemacie.
+
+# Run once against an empty database/schema.
 docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
-  --env DATABASE_URL ghcr.io/zewelor/garmin-daily:latest migrate
+  --env-file .env ghcr.io/zewelor/garmin-daily:latest migrate
+
+# Import today and the previous six calendar dates in your Garmin timezone.
 docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
-  --env DATABASE_URL --env GARMIN_API_KEY ghcr.io/zewelor/garmin-daily:latest \
-  sync --last-days 7 --timezone UTC
+  --env-file .env ghcr.io/zewelor/garmin-daily:latest \
+  sync --last-days 7 --timezone Europe/London
 ```
 
-Dobierz strefę do dat swojego konta Garmin. Obraz nie zawiera kluczy API, ustawień
-bazy, danych konta ani plików `.env`. `docker/metadata-action` generuje tagi oraz
-etykiety OCI ze źródłem i rewizją; publikacja używa repozytoryjnego `GITHUB_TOKEN`.
+Choose the IANA timezone that matches your Garmin account. See
+[deployment](docs/deployment.md) for scheduling, database roles and backups.
 
-Przy pierwszej publikacji maintainer musi ustawić widoczność **pakietu** na
-`Public` w ustawieniach GHCR; nowy pakiet jest domyślnie prywatny niezależnie od
-widoczności repozytorium. Dopiero anonimowe pobranie manifestu/obrazu potwierdza
-publiczny dostęp. [Dokumentacja GHCR](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
+### Try it locally with Compose
 
-## Docker i weryfikacja
+Compose provides a **disposable development database**, not a production setup.
+Use `.env.example` as a template for your local `.env`; preserve any existing file.
+Compose reads `.env` automatically.
 
 ```sh
-just unit
-go vet ./...
-just integration
-go test ./garmin -run '^$' -fuzz FuzzEpochMilliseconds -fuzztime 5s
-just show_dockerignore
-just docker-build
-
-# Lokalny, tymczasowy zestaw do prób; Compose odczytuje .env.
 docker compose up -d --wait db
+docker compose build app
 docker compose run --rm app migrate
 docker compose run --rm app sync --from 2026-10-25 --to 2026-10-31
 ```
 
-`just integration` zarządza oddzielnym projektem Compose `garmin-daily-integration`: uruchamia
-i usuwa jego testową bazę wraz z wolumenem. Port 15432 musi być wolny: zatrzymaj
-ręczną bazę deweloperską przed testem. Baza Compose jest **jednorazowa**, nie służy
-do zachowania historii.
-Testy tworzą i usuwają własne schematy. Można też użyć istniejącej bazy testowej:
-`TEST_DATABASE_URL=... go test -tags integration -v ./...`.
+The database listens on `127.0.0.1:15432`. Its example credentials are for local
+use only. Run `migrate` once; running it again reports that the tables exist.
 
-Obraz to statyczna binarka i certyfikaty CA w `scratch`, użytkownik 65532.
-Nie potrzebuje zapisu do systemu plików ani uprawnień roota.
-Kontekst budowania dopuszcza wyłącznie pliki programu, modułu, migracji i licencji.
-Docker według [oficjalnego przewodnika początkowego](https://github.com/docker/skills/tree/main/skills/docker-project-foundations),
-z zakresem ograniczonym do tego CLI.
+## Configuration
 
-Wymagane lokalnie i w CI: format Go, `go vet`, testy HTTP oraz testy na prawdziwym
-PostgreSQL: import → identyczny import → korekta → brak pola → uzupełnienie →
-błąd w trzeciej tabeli → wznowienie. Dodatkowy test zrywa połączenie do bazy
-w trakcie zapisu trzeciej tabeli i sprawdza rollback oraz wznowienie po połączeniu. Test sprawdza też rzeczywisty brak nowej
-wersji wiersza przy identycznym imporcie i dokładność dziesiętną.
-To test integracyjny z kontrolowanym HTTP; test rzeczywistego Garmina jest
-oddzielną granicą dowodu. Go fuzzing sprawdza zachowanie momentu czasu przy dekodowaniu epoch ms.
+Secrets are read from the environment, never command-line arguments. The binary
+does **not** load `.env` itself; use Compose, `docker run --env-file`, or your
+process manager to supply it.
 
-CI sprawdza format Go, `go vet`, testy jednostkowe i integracyjne oraz budowanie
-obrazu i migrację w kontenerze. Pull requesty nie mają uprawnień do publikowania.
-Po przejściu weryfikacji push do domyślnej gałęzi publikuje obraz GHCR;
-`workflow_dispatch` pozwala powtórzyć cały proces z tej gałęzi.
-Renovate używa `.github/renovate.json`, z przeglądem zmian bez automerge.
+| Variable | Required by | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | `migrate`, `sync` | PostgreSQL connection string and TLS settings. |
+| `GARMIN_API_KEY` | `sync` | Garmin Connect Personal API key. |
+| `PGHOST`, `PGUSER`, `PGPASSWORD` | Optional | Standard pgx connection parameters; useful for keeping credentials out of the URL. |
 
-Wskazówki dla harmonogramów i wdrożeń: [uruchamianie cykliczne](docs/gitops.md).
+| Command | Behavior |
+| --- | --- |
+| `migrate` | Create the initial schema in one transaction. Run once on an empty database/schema. |
+| `sync --from YYYY-MM-DD --to YYYY-MM-DD` | Import an inclusive range of Garmin calendar dates. |
+| `sync --last-days N --timezone IANA_ZONE` | Import today and the previous `N−1` dates in the chosen timezone. |
 
-## Źródła kontraktu
+There is no default date range. The two range modes cannot be combined.
+`--last-days` must be positive and requires a named IANA timezone or `UTC`;
+`Local` is rejected. `--timezone` is only valid with `--last-days`. Timezone data
+is embedded in the binary.
 
-- [Personal API i autoryzacja](https://developer.garmin.com/gc-developer-program/personal/personal-api/)
-- [FAQ kluczy i tokenów](https://developer.garmin.com/gc-developer-program/personal/personal-faq/)
-- [Oficjalny Swagger](https://developer.garmin.com/gc-developer-program/personal/swagger-docs/)
-- [Oficjalny klient Python](https://github.com/garmin/connect-personal-api-python)
-- [pgx](https://github.com/jackc/pgx)
+A successful sync exits with code `0` and reports each day:
 
-Zweryfikowano protokół na rzeczywistym API. Token jest surowym tekstem,
-nie obiektem JSON; żądanie tokenu wymaga `Accept: */*` (JSON dawał HTTP 406).
-Oficjalny Swagger opisuje znaczniki snu jako string/date-time, ale jego opis
-mówi o ms, a rzeczywiste odpowiedzi zawierają liczby epoch ms. Implementacja
-obsługuje potwierdzony format liczbowy, bez zgadywania alternatywnych formatów.
+```text
+day=2026-10-25 changed_rows=3
+```
 
-## Licencja
+An identical repeat reports `changed_rows=0`. An error exits with code `1` and
+stops the range; earlier committed days remain. Repeat the range to resume.
+Run only one writer against the same tables at a time.
 
-[MIT](LICENSE). Kopia licencji znajduje się także w obrazie pod `/LICENSE`.
+## Data model
+
+| Table | Contents |
+| --- | --- |
+| `daily_health` | Steps, distance, calories, heart rate, intensity, stress and Body Battery. |
+| `daily_sleep` | Sleep timestamps, duration, stages, naps, score and overnight averages. |
+| `daily_hrv` | Nightly and weekly HRV, status and baseline values reported by Garmin. |
+
+All tables use `day DATE` as the primary key. Missing values remain SQL `NULL`;
+zero remains zero. Decimal measurements retain their source precision without
+passing through `float64`. Each day's three responses are fetched and validated
+before a single database transaction writes them.
+
+The [data model reference](docs/data-model.md) documents every field, unit,
+validation rule and HTTP retry policy. No raw responses, account identifiers or
+device metadata are persisted. Trends can be queried directly in SQL.
+
+## Container images
+
+Images are published to
+[`ghcr.io/zewelor/garmin-daily`](https://github.com/users/zewelor/packages/container/package/garmin-daily)
+for **Linux amd64 and arm64**.
+
+| Reference | Meaning |
+| --- | --- |
+| `latest` | Most recently verified and published commit from the default branch. |
+| `<full-commit-SHA>` | Image built from a specific commit. |
+| `@sha256:…` | Exact published image digest; use this to pin deployments. |
+
+CI verifies formatting, `go vet`, unit tests, PostgreSQL integration tests, the
+container build and a container migration before publishing. Pull requests do
+not receive package-write permissions and never publish images. A manual
+`workflow_dispatch` run on the default branch can repeat verification and publication.
+
+`docker/metadata-action` generates tags and OCI source/revision labels. Publishing
+uses `GITHUB_TOKEN`; no separate registry secret is needed. The published digest
+appears in the job summary. Layer caching is enabled, and cleanup retains 10
+recent tagged and 10 untagged versions while protecting `latest`. Older versions
+may be removed, so a commit tag is not a promise of indefinite retention.
+
+The image contains no API keys, database settings, account data or `.env` files.
+The production build context allows only application source, module files,
+the embedded schema and the license; tests are excluded.
+
+## Development
+
+Use the Go version declared in [go.mod](go.mod). Docker, Compose and `just` are
+needed for the container and integration workflows.
+
+```sh
+go build -trimpath -o garmin-daily ./cmd/garmin-daily
+just unit
+go vet ./...
+just integration
+just docker-build
+```
+
+`just integration` creates and removes its own Compose project and test database.
+Port `15432` must be free; stop a manually started development database before
+running it. Alternatively, supply a dedicated test database:
+
+```sh
+TEST_DATABASE_URL='postgres://…' go test -race -tags integration -v ./...
+```
+
+Tests cover HTTP failures, validation, repeat imports, corrections, missing and
+late values, exact decimals, transaction rollback and recovery after a lost
+connection. HTTP fixtures are synthetic; this suite does not contact a real
+Garmin account.
+
+CLI and PostgreSQL code live in `cmd/garmin-daily/`. The `garmin/` package is an
+independent, standard-library-only Personal API client. Renovate maintains
+version and digest updates; merging remains manual.
+
+## API references
+
+- [Garmin Personal API and authorization](https://developer.garmin.com/gc-developer-program/personal/personal-api/)
+- [API key and token FAQ](https://developer.garmin.com/gc-developer-program/personal/personal-faq/)
+- [Official Swagger](https://developer.garmin.com/gc-developer-program/personal/swagger-docs/)
+- [Official Python client](https://github.com/garmin/connect-personal-api-python)
+
+## License
+
+[MIT](LICENSE). A copy is included in the container at `/LICENSE`.
