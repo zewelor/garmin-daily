@@ -19,18 +19,19 @@ import (
 
 func run(ctx context.Context, args []string, getenv func(string) string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: garmin-daily migrate | sync --from YYYY-MM-DD --to YYYY-MM-DD | sync --last-days N --timezone IANA_ZONE [--exclude-today]")
+		return fmt.Errorf("usage: garmin-daily migrate | migrate-activities | sync | sync-activities [date range flags]")
 	}
 	command := args[0]
-	if command != "sync" && command != "migrate" {
-		return fmt.Errorf("unknown command; use migrate or sync")
+	if command != "sync" && command != "sync-activities" && command != "migrate" && command != "migrate-activities" {
+		return fmt.Errorf("unknown command; use migrate, migrate-activities, sync or sync-activities")
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(out)
 	var from, to, timezone string
 	var lastDays int
 	var excludeToday bool
-	if command == "sync" {
+	syncCommand := command == "sync" || command == "sync-activities"
+	if syncCommand {
 		flags.StringVar(&from, "from", "", "first Garmin calendar date (inclusive)")
 		flags.StringVar(&to, "to", "", "last Garmin calendar date (inclusive)")
 		flags.IntVar(&lastDays, "last-days", 0, "number of Garmin calendar dates ending today")
@@ -44,7 +45,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 		return fmt.Errorf("unexpected positional arguments")
 	}
 	var start, end time.Time
-	if command == "sync" {
+	if syncCommand {
 		var absolute, rolling, zoned, excludeTodaySet bool
 		flags.Visit(func(f *flag.Flag) {
 			switch f.Name {
@@ -82,7 +83,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 		}
 	}
 	key := strings.TrimSpace(getenv("GARMIN_API_KEY"))
-	if command == "sync" && key == "" {
+	if syncCommand && key == "" {
 		return fmt.Errorf("GARMIN_API_KEY is required")
 	}
 	dsn := getenv("DATABASE_URL")
@@ -99,11 +100,19 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 	if command == "migrate" {
 		return migrate(ctx, conn)
 	}
+	if command == "migrate-activities" {
+		return migrateActivities(ctx, conn)
+	}
 	c := garmin.NewClient(garmin.BaseURL, &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
 	if err := c.Authenticate(ctx, key); err != nil {
 		return fmt.Errorf("authentication: %w", err)
 	}
-	return syncRange(ctx, c, conn, start, end, out)
+	if command == "sync" {
+		if err := syncRange(ctx, c, conn, start, end, out); err != nil {
+			return err
+		}
+	}
+	return syncActivitiesRange(ctx, c, conn, start, end, out)
 }
 
 func recentDaysRange(now time.Time, days int, timezone string, excludeToday bool) (time.Time, time.Time, error) {

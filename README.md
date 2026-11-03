@@ -1,6 +1,6 @@
 # GarminDaily
 
-Sync daily Garmin Connect health, sleep and HRV metrics to PostgreSQL.
+Sync Garmin Connect health, sleep, HRV and activity summaries to PostgreSQL.
 
 [![CI](https://github.com/zewelor/garmin-daily/actions/workflows/ci.yml/badge.svg)](https://github.com/zewelor/garmin-daily/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/github/go-mod/go-version/zewelor/garmin-daily?logo=go)](go.mod)
@@ -13,14 +13,15 @@ GarminDaily is a small, run-once CLI built around the official **Garmin Connect
 Personal API**. It authenticates, imports an explicit date range and exits.
 Run it manually or schedule it with cron, systemd or a Kubernetes CronJob.
 
-- **Three daily tables** for health, sleep and HRV, with one row per date.
+- **Five compact tables** for daily health, sleep and HRV, activities, and workout summaries.
 - **Repeatable imports** that apply corrections and skip unchanged rows.
-- **Atomic daily writes**: a failed day leaves no partial records.
+- **Atomic writes**: each daily date and the full fetched activity range commit transactionally.
 - **Small container**: a static Go binary, CA certificates and license in
   `scratch`, running as UID/GID `65532:65532` with no writable filesystem required.
 
 Each database or schema belongs to **one Garmin account**. The application does
-not manage users, run a web server or store intraday samples.
+not manage users, run a web server or store intraday samples, GPS data, raw API
+responses, account identifiers or device metadata.
 
 ## Quick start
 
@@ -42,7 +43,7 @@ container: `localhost` refers to the container itself. Keep `.env` out of Git.
 ```sh
 docker pull ghcr.io/zewelor/garmin-daily:latest
 
-# Run once against an empty database/schema.
+# Run once against an empty database/schema. Creates all five tables.
 docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
   --env-file .env ghcr.io/zewelor/garmin-daily:latest migrate
 
@@ -50,6 +51,15 @@ docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
 docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
   --env-file .env ghcr.io/zewelor/garmin-daily:latest \
   sync --last-days 7 --timezone Europe/London
+```
+
+For a database that already has the three daily tables from an older GarminDaily
+release, run `migrate-activities` once before the next sync. See
+[deployment](docs/deployment.md#upgrade-an-existing-database).
+
+```sh
+docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --env-file .env ghcr.io/zewelor/garmin-daily:latest migrate-activities
 ```
 
 Choose the IANA timezone that matches your Garmin account. See
@@ -79,16 +89,19 @@ process manager to supply it.
 
 | Variable | Required by | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | `migrate`, `sync` | PostgreSQL connection string and TLS settings. |
-| `GARMIN_API_KEY` | `sync` | Garmin Connect Personal API key. |
+| `DATABASE_URL` | `migrate`, `migrate-activities`, `sync`, `sync-activities` | PostgreSQL connection string and TLS settings. |
+| `GARMIN_API_KEY` | `sync`, `sync-activities` | Garmin Connect Personal API key. |
 | `PGHOST`, `PGUSER`, `PGPASSWORD` | Optional | Standard pgx connection parameters; useful for keeping credentials out of the URL. |
 
 | Command | Behavior |
 | --- | --- |
-| `migrate` | Create the initial schema in one transaction. Run once on an empty database/schema. |
-| `sync --from YYYY-MM-DD --to YYYY-MM-DD` | Import an inclusive range of Garmin calendar dates. |
-| `sync --last-days N --timezone IANA_ZONE` | Import today and the previous `N−1` dates in the chosen timezone. |
-| `sync --last-days N --timezone IANA_ZONE --exclude-today` | Import yesterday and the previous `N−1` completed dates in the chosen timezone. |
+| `migrate` | Create the three daily and two activity tables in one transaction. Run once on an empty database/schema. |
+| `migrate-activities` | Add the two activity tables transactionally to an existing three-table installation. Run once. |
+| `sync --from YYYY-MM-DD --to YYYY-MM-DD` | Import daily data and activities for an inclusive range of Garmin calendar dates. |
+| `sync --last-days N --timezone IANA_ZONE` | Import daily data and activities for today and the previous `N−1` dates in that timezone. |
+| `sync --last-days N --timezone IANA_ZONE --exclude-today` | Import daily data and activities for yesterday and the previous `N−1` completed dates in that timezone. |
+| `sync-activities --from YYYY-MM-DD --to YYYY-MM-DD` | Import activities only for an inclusive range. |
+| `sync-activities --last-days N --timezone IANA_ZONE [--exclude-today]` | Import activities only for the selected rolling range; useful for backfills. |
 
 There is no default date range. The two range modes cannot be combined.
 `--last-days` must be positive and requires a named IANA timezone or `UTC`;
@@ -97,15 +110,20 @@ explicit `--last-days` range. `--exclude-today` uses local calendar dates, so it
 ends yesterday regardless of the execution time or daylight-saving changes.
 Timezone data is embedded in the binary.
 
-A successful sync exits with code `0` and reports each day:
+A successful `sync` reports each daily date and then an activity aggregate:
 
 ```text
 day=2026-10-25 changed_rows=3
+activities=4 changed_rows=4
 ```
 
-An identical repeat reports `changed_rows=0`. An error exits with code `1` and
-stops the range; earlier committed days remain. Repeat the range to resume.
-Run only one writer against the same tables at a time.
+An identical repeat reports `changed_rows=0`. Activity output contains counts
+only, not activity names or IDs. Daily records commit one day at a time. The
+activity API pages are all fetched and validated before one transaction writes
+the requested activity range and its exercise snapshots. If activity fetching
+or writing fails, `sync` exits nonzero; already committed daily dates remain,
+and the activity range has no partial writes. Repeat the range to resume. Run
+only one writer against the same tables at a time.
 
 ## Data model
 
@@ -114,15 +132,20 @@ Run only one writer against the same tables at a time.
 | `daily_health` | Steps, distance, calories, heart rate, intensity, stress and Body Battery. |
 | `daily_sleep` | Sleep timestamps, duration, stages, naps, score and overnight averages. |
 | `daily_hrv` | Nightly and weekly HRV, status and baseline values reported by Garmin. |
+| `activities` | One row per Garmin activity ID, including source-local date and UTC start instant. |
+| `activity_exercises` | Indexed workout summary elements attached to an activity. |
 
-All tables use `day DATE` as the primary key. Missing values remain SQL `NULL`;
-zero remains zero. Decimal measurements retain their source precision without
-passing through `float64`. Each day's three responses are fetched and validated
-before a single database transaction writes them.
+Daily tables use `day DATE` as the primary key. Activity rows use Garmin's
+`activity_id`; exercise rows use `(activity_id, exercise_index)`. Missing values
+remain SQL `NULL`; zero remains zero. Decimal measurements retain their source
+precision without passing through `float64`. Each day's three responses are
+fetched and validated before a single database transaction writes them.
 
 The [data model reference](docs/data-model.md) documents every field, unit,
-validation rule and HTTP retry policy. No raw responses, account identifiers or
-device metadata are persisted. Trends can be queried directly in SQL.
+validation rule and HTTP retry policy. Activities are upserted by ID; corrections
+replace prior values, exercise arrays replace their prior indexed snapshot, and
+activities absent from a response are retained. Trends can be queried directly
+in SQL.
 
 ## Container images
 
@@ -148,8 +171,8 @@ recent tagged and 10 untagged versions while protecting `latest`. Older versions
 may be removed, so a commit tag is not a promise of indefinite retention.
 
 The image contains no API keys, database settings, account data or `.env` files.
-The production build context allows only application source, module files,
-the embedded schema and the license; tests are excluded.
+The production build context allows only application source, module files, both
+embedded schemas and the license; tests are excluded.
 
 ## Development
 

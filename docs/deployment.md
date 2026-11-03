@@ -12,16 +12,32 @@ secret manager or GitOps system.
 2. Supply `DATABASE_URL` and `GARMIN_API_KEY` through your secret manager or
    process environment. Keep real values out of Git and command-line arguments.
 3. Pin `ghcr.io/zewelor/garmin-daily` to the digest in the publication job summary.
-4. Run `migrate` once against the empty database/schema. Running it again is an
-   error; do not include it in each scheduled sync.
+4. Run `migrate` once against the empty database/schema. It creates all five
+   tables in one transaction. Running it again is an error; do not include it
+   in each scheduled sync.
 5. Import an explicit range with `sync --from YYYY-MM-DD --to YYYY-MM-DD`, check
-   the dates and measurements, then repeat it. With unchanged source data,
-   every day should report `changed_rows=0`.
+   the daily dates and activity summaries, then repeat it. With unchanged source
+   data, daily and activity writes should report `changed_rows=0`.
 
 Use the connection string's `search_path` parameter to select a schema. pgx also
 accepts `PGHOST`, `PGUSER` and `PGPASSWORD`, so credentials need not be embedded
 in the URL. Configure TLS for your server; the `sslmode=disable` setting in
 Compose is for local testing only.
+
+## Upgrade an existing database
+
+An installation created by an earlier GarminDaily release has the three daily
+tables. Before running the new `sync`, execute `migrate-activities` once with a
+role allowed to create tables in the selected schema. This creates
+`activities` and `activity_exercises` together in one transaction and leaves
+daily tables and rows untouched. The command fails if either activity table
+already exists; do not rerun it after success. Do not run the fresh-install
+`migrate` against an existing daily schema because that command creates all
+five tables and deliberately fails on existing tables.
+
+If an activity table already exists from a prior attempt, inspect the schema
+before syncing. The migration is transactional, so a failed execution does not
+leave a newly created half of the activity schema.
 
 ## Schedule synchronization
 
@@ -30,6 +46,22 @@ For example:
 ```sh
 garmin-daily sync --last-days 3 --timezone Europe/London
 ```
+
+`sync` imports daily rows first, committing each date, then synchronizes all
+activities whose source-local start date falls within the same inclusive range.
+It fetches and validates every activity page before writing, then commits the
+activity summaries and exercise snapshots in one range transaction. An API or
+database failure in the activity step exits nonzero while earlier daily rows
+remain committed; the activity range itself has no partial writes.
+
+To backfill activities without repeating daily requests, run for example:
+
+```sh
+garmin-daily sync-activities --last-days 90 --timezone Europe/London
+```
+
+`sync-activities` accepts the same inclusive `--from`/`--to` and rolling
+`--last-days`/`--timezone`/`--exclude-today` flags as `sync`.
 
 Choose the IANA timezone matching your Garmin account. This imports today and
 the previous two calendar dates. To import three completed dates ending
@@ -55,8 +87,9 @@ Allow only one writer against the same tables at a time. For Kubernetes, use:
 | `activeDeadlineSeconds` | An explicit deadline suited to the date range. |
 
 Run manual Jobs sequentially as well; CronJob concurrency policy does not prevent
-them from overlapping. Monitor exit codes and logs. A failure stops the range
-while preserving earlier committed days; rerun the range to resume.
+them from overlapping. Monitor exit codes and logs. A failure stops the range.
+Earlier committed daily dates remain; activity changes are committed as one
+range and roll back together on a write failure. Rerun the range to resume.
 
 ## Container runtime
 

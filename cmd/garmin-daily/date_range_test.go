@@ -48,6 +48,23 @@ func TestSyncDateFlags(t *testing.T) {
 	}
 }
 
+func TestSyncActivitiesDateFlags(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--last-days", "90", "--timezone", "Atlantic/Madeira"}, "GARMIN_API_KEY is required"},
+		{[]string{"--last-days", "90", "--exclude-today", "--timezone", "Atlantic/Madeira"}, "GARMIN_API_KEY is required"},
+		{[]string{"--from", "2026-10-25", "--to", "2026-10-31"}, "GARMIN_API_KEY is required"},
+		{[]string{"--from", "2026-02-30", "--to", "2026-03-01"}, "valid YYYY-MM-DD"},
+	} {
+		err := run(context.Background(), append([]string{"sync-activities"}, tc.args...), func(string) string { return "" }, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("run() error = %v, want %q", err, tc.want)
+		}
+	}
+}
+
 func TestRecentDaysRange(t *testing.T) {
 	tests := []struct {
 		name         string

@@ -54,3 +54,17 @@ func syncRange(ctx context.Context, c *garmin.Client, conn *pgx.Conn, from, to t
 	}
 	return nil
 }
+
+func syncActivitiesRange(ctx context.Context, c *garmin.Client, conn *pgx.Conn, from, to time.Time, out io.Writer) error {
+	fromDate, toDate := from.Format(time.DateOnly), to.Format(time.DateOnly)
+	activities, err := c.Activities(ctx, fromDate, toDate)
+	if err != nil {
+		return fmt.Errorf("activity fetch: %w", err)
+	}
+	changed, err := saveActivities(ctx, conn, activities, fromDate, toDate)
+	if err != nil {
+		return fmt.Errorf("activity save: %w", err)
+	}
+	_, err = fmt.Fprintf(out, "activities=%d changed_rows=%d\n", len(activities), changed)
+	return err
+}
