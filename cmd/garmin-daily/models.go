@@ -9,9 +9,9 @@ import (
 )
 
 type dayData struct {
-	Health garmin.Summary
-	Sleep  garmin.Sleep
-	HRV    garmin.HRV
+	Health garmin.Summary `json:"health"`
+	Sleep  garmin.Sleep   `json:"sleep"`
+	HRV    garmin.HRV     `json:"hrv"`
 }
 
 func validDay(s string) bool {
@@ -19,7 +19,7 @@ func validDay(s string) bool {
 	return err == nil && d.Year() >= 1 && d.Format(time.DateOnly) == s
 }
 
-func nonnegative[T ~int16 | ~int32](values ...*T) bool {
+func nonnegative[T ~int16 | ~int32 | ~int64](values ...*T) bool {
 	for _, v := range values {
 		if v != nil && *v < 0 {
 			return false

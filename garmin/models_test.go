@@ -17,6 +17,10 @@ func FuzzEpochMilliseconds(f *testing.F) {
 			if err != nil || e.UnixMilli() != n {
 				t.Fatal("epoch round trip changed instant")
 			}
+			encoded, err := json.Marshal(e)
+			if err != nil || string(encoded) != string(b) {
+				t.Fatalf("fetch export changed epoch milliseconds: %s err=%v", encoded, err)
+			}
 		} else if err == nil {
 			t.Fatal("invalid epoch accepted")
 		}

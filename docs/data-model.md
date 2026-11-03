@@ -4,6 +4,9 @@ This reference describes the PostgreSQL rows written by `garmin-daily`. See the
 [README](../README.md) for setup and operation, and the
 [SQL schema](../cmd/garmin-daily/schema.sql) for the exact DDL.
 
+Additional monitoring fields available through `fetch` are documented in the
+[fetch reference](fetch.md). They are not yet part of PostgreSQL storage.
+
 ## Tables and keys
 
 The schema stores one Garmin account's data in the selected database or
