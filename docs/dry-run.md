@@ -6,11 +6,14 @@ same date-range parsing and daily download loop as normal `sync`. It prints
 daily progress and summary counts; optional `--output NEW_DIRECTORY` keeps
 inspection artifacts. `--output` is accepted only with `--dry-run`.
 
-The additional monitoring metrics are still at the inspection stage before
-adding PostgreSQL tables or columns. Normal `sync` writes the three daily tables and top-level recorded activities/exercise summaries;
-additional monitoring fields remain inspection-only. Dry-run inspection also retains child sessions,
-which the database import excludes to avoid counting parent and child sessions together. The dry run does not
-test database connectivity, permissions or SQL writes.
+Normal `sync` stores daily summaries including respiration and stress durations,
+top-level activities including time in HR zones, exercise summaries and weight
+measurements. The dry run uses the same daily validation and weight conversion
+checks. Additional optional API fields remain inspection-only: current zone
+configuration, body composition, daily SpO₂, VO₂max and training stress score.
+Dry-run inspection also retains child sessions, which the database import
+excludes to avoid counting parent and child sessions together. The dry run does
+not test database connectivity, permissions or SQL writes.
 
 ## Selected monitoring fields
 
@@ -43,9 +46,10 @@ an empty or `null` HTTP 200 response is an error.
 The [official Swagger](https://developer.garmin.com/gc-developer-program/personal/swagger-docs/)
 describes `DateWeightDTO.weight` as kilograms. A controlled live measurement,
 checked against the account holder's manually entered kg value, was instead
-returned in **grams**. The dry run preserves the original `weight` value; it does
-not silently divide it. Interpret the verified source value as grams when
-reviewing it, and explicitly convert it when implementing database storage.
+returned in **grams**. The dry-run artifact preserves the original `weight`
+value. Normal `sync` explicitly converts those grams to `weight_kg` by shifting
+the decimal exponent, without passing through `float64`. Body-composition fields
+are not mapped to the database.
 
 Weight `date` and `timestampGMT` arrive as numeric epoch milliseconds, despite
 Swagger declaring strings. UTC weight and sleep timestamps are decoded and
@@ -55,7 +59,7 @@ retain the source `yyyy-MM-dd HH:mm:ss` strings: `startTimeGMT` is UTC and
 `startTimeLocal` is local time without an offset.
 
 Body-composition fields were null in the controlled live sample. Their populated
-response formats and units still need live verification before database mapping.
+response formats and units would need live verification before any future database mapping.
 VO₂max, training stress score and daily SpO₂ were also absent in that sample;
 synthetic tests cover optional values, but absence is not proof of populated
 device-specific behavior. Recorded sessions may supply different subsets of

@@ -3,11 +3,12 @@
 This reference describes the PostgreSQL rows written by `garmin-daily`. See the
 [README](../README.md) for setup and operation, and the
 [daily SQL schema](../cmd/garmin-daily/schema.sql) and
-[activity SQL schema](../cmd/garmin-daily/activity_schema.sql) for the exact DDL.
+[activity SQL schema](../cmd/garmin-daily/activity_schema.sql) and
+[monitoring migration](../cmd/garmin-daily/monitoring_schema.sql) for the exact DDL.
 
 Additional monitoring fields available through `sync --dry-run` are documented
-in the [dry-run reference](dry-run.md). Additional monitoring fields beyond the daily/activity
-columns below are not yet part of PostgreSQL storage.
+in the [dry-run reference](dry-run.md). Fields beyond the mappings below remain
+inspection-only; zone settings, body composition, daily SpO₂ and VO₂max are not stored.
 
 ## Tables and keys
 
@@ -22,11 +23,12 @@ schema for each account.
 | `daily_hrv` | `day DATE` | Daily HRV summary |
 | `activities` | `activity_id BIGINT` | Activity summary selected from the requested local-date range |
 | `activity_exercises` | `(activity_id, exercise_index)` | Indexed exercise summary elements for an activity |
+| `weight_measurements` | `measured_at TIMESTAMPTZ` | Every body-weight measurement, including several on one day |
 
 `daily_sleep.day` and `daily_hrv.day` are foreign keys to
 `daily_health.day`. All three tables use Garmin's `calendarDate`; sleep is not
 split at midnight or a daylight-saving change. The schema does not store
-device metadata, raw API responses, intraday samples, or precomputed 7/30/90-day
+device metadata, raw API responses, intraday sensor series, or precomputed 7/30/90-day
 aggregates. There are no generated IDs, secondary indexes, or JSONB columns.
 Garmin-provided averages, including weekly HRV, are stored as source metrics;
 the importer does not calculate replacement averages. With only a few rows,
@@ -36,8 +38,9 @@ dataset.
 ## Field mapping
 
 Each database column below maps directly to the named Personal API field;
-source measurements are stored without correction. Nested field paths include
-their full parent path.
+source measurements are stored without correction. Body mass is explicitly
+converted from source grams to kilograms using exact decimal arithmetic.
+Nested field paths include their full parent path.
 
 | Table column | Personal API field | Unit or meaning |
 | --- | --- | --- |
@@ -54,6 +57,16 @@ their full parent path.
 | `daily_health.vigorous_minutes` | `intensityMinutes.vigorous` | minutes; not doubled |
 | `daily_health.stress_avg` | `stress.avgLevel` | 0–100 |
 | `daily_health.stress_max` | `stress.maxLevel` | 0–100 |
+| `daily_health.stress_rest_ms` | `stress.restDurationInMillis` | milliseconds |
+| `daily_health.stress_activity_ms` | `stress.activityDurationInMillis` | milliseconds |
+| `daily_health.stress_uncategorized_ms` | `stress.uncategorizedDurationInMillis` | milliseconds |
+| `daily_health.stress_low_ms` | `stress.lowStressDurationInMillis` | milliseconds |
+| `daily_health.stress_medium_ms` | `stress.mediumStressDurationInMillis` | milliseconds |
+| `daily_health.stress_high_ms` | `stress.highStressDurationInMillis` | milliseconds |
+| `daily_health.respiration_avg` | `respiration.avgValue` | breaths per minute |
+| `daily_health.respiration_min` | `respiration.minValue` | breaths per minute |
+| `daily_health.respiration_max` | `respiration.maxValue` | breaths per minute |
+| `daily_health.respiration_latest` | `respiration.latestValue` | breaths per minute |
 | `daily_health.body_battery_min` | `bodyBattery.minValue` | 0–100 |
 | `daily_health.body_battery_max` | `bodyBattery.maxValue` | 0–100 |
 | `daily_health.body_battery_latest` | `bodyBattery.latestValue` | 0–100 |
@@ -96,6 +109,11 @@ their full parent path.
 | `activities.reps` | `totalReps` | summary repetition count |
 | `activities.depth_max_cm` | `maxDepth` | centimetres |
 | `activities.body_battery_change` | `differenceBodyBattery` | signed change, constrained to -100 through 100 |
+| `activities.heart_rate_zone_1_s` | `hrTimeInZone_1` | seconds |
+| `activities.heart_rate_zone_2_s` | `hrTimeInZone_2` | seconds |
+| `activities.heart_rate_zone_3_s` | `hrTimeInZone_3` | seconds |
+| `activities.heart_rate_zone_4_s` | `hrTimeInZone_4` | seconds |
+| `activities.heart_rate_zone_5_s` | `hrTimeInZone_5` | seconds |
 | `activity_exercises.exercise_index` | Position in `summarizedExerciseSets` | Zero-based source array index |
 | `activity_exercises.category` | `summarizedExerciseSets[].category` | Optional category |
 | `activity_exercises.subcategory` | `summarizedExerciseSets[].subCategory` | Optional subcategory |
@@ -104,6 +122,14 @@ their full parent path.
 | `activity_exercises.duration_ms` | `summarizedExerciseSets[].duration` | milliseconds |
 | `activity_exercises.max_weight_g` | `summarizedExerciseSets[].maxWeight` | grams |
 | `activity_exercises.volume_g` | `summarizedExerciseSets[].volume` | grams × repetitions, summed across sets |
+| `weight_measurements.measured_at` | `timestampGMT` | epoch milliseconds converted to a UTC instant |
+| `weight_measurements.day` | `calendarDate` | Garmin local calendar date, not derived from the UTC timestamp |
+| `weight_measurements.weight_kg` | `weight` | source grams divided by 1000, preserving decimal precision |
+
+The live weight unit was checked against a manually entered account value;
+Swagger incorrectly labels it as kg. Local `date`, signed `weightDelta`, BMI
+and body composition remain inspection-only. Missing required measurement time
+or mass, an out-of-range date, or duplicate timestamps abort the weight batch.
 
 Garmin's Personal API schema does not assign a unit to the HRV fields. The
 importer stores them unchanged and does not convert or infer a unit. Confirm
@@ -113,10 +139,10 @@ their unit before labeling a dashboard axis.
 
 | PostgreSQL type | Used for |
 | --- | --- |
-| `smallint` | Daily heart rates, intensity minutes, stress, Body Battery values, and sleep score |
-| `integer` | Steps, calories, sleep durations, HRV values, and activity/exercise counts |
+| `smallint` | Daily heart rates, respiration, intensity minutes, stress, Body Battery values, and sleep score |
+| `integer` | Steps, calories, sleep durations, stress milliseconds, HRV values, and activity/exercise counts |
 | `numeric` | Fractional daily and activity measurements, durations, weights, and volume |
-| `timestamptz` | Sleep start/end and activity start instants |
+| `timestamptz` | Sleep start/end, activity start and body-weight measurement instants |
 | `text` | HRV status, activity name/type and exercise labels |
 
 Stress, Body Battery levels, sleep score, sleep stress, and SpO2 are constrained
@@ -159,8 +185,14 @@ values fail instead of being clipped or changed to zero.
   A page or validation failure leaves the activity range untouched. The activity
   batch is written in one transaction, so a database error or cancellation rolls
   back all activity and exercise changes in that range.
-- `sync` commits daily rows one date at a time before it fetches the activity
-  range. If the activity step fails, those daily commits remain; rerun the range
+- Weight entries are upserted by their UTC measurement timestamp. Each date can
+  have multiple entries. Corrections update an existing timestamp, and unchanged
+  entries are not rewritten. Entries absent from a later response are retained;
+  an empty weight range creates no rows and infers no deletions.
+- All weight entries are validated before a single range transaction begins.
+  A write failure or cancellation rolls back that entire weight batch.
+- `sync` commits daily rows one date at a time, then activity/exercise summaries,
+  then weights. A later failure retains earlier committed steps; rerun the range
   to complete or correct it.
 
 Garmin HTTP requests have a 20-second timeout and an 8 MiB response limit.
@@ -169,8 +201,17 @@ HTTP 429 and 5xx responses are retried up to three attempts, respecting
 HTTP errors, network failures, and timeouts are not retried. Database connection
 and per-day transaction operations each have a 20-second timeout. Activity range
 transactions have a two-minute timeout. SIGINT and SIGTERM cancel I/O. Logs omit
-API keys, tokens, database connection strings, response bodies, activity names
-and IDs.
+API keys, tokens, database connection strings, response bodies, activity names,
+IDs and body-weight values.
+
+## PostgreSQL design reference
+
+The [garmin-grafana PostgreSQL backend](https://github.com/tasmith039/garmin-grafana/blob/postgres-backend/docs/postgres-backend.md)
+is a useful example of separate timestamp-keyed measurements and repeatable
+upserts. GarminDaily keeps its explicit typed schema and exact decimal values.
+Unlike that InfluxDB-compatible backend, it applies source `NULL` corrections
+and fails a transaction on incompatible values; it does not create columns or
+widen types automatically during synchronization.
 
 ## API client and protocol
 

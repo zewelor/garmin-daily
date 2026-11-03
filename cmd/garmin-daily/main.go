@@ -19,11 +19,11 @@ import (
 
 func run(ctx context.Context, args []string, getenv func(string) string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: garmin-daily migrate | migrate-activities | sync [--dry-run [--output NEW_DIRECTORY]] | sync-activities [date range flags]")
+		return fmt.Errorf("usage: garmin-daily migrate | migrate-activities | migrate-monitoring | sync [--dry-run [--output NEW_DIRECTORY]] | sync-activities [date range flags]")
 	}
 	command := args[0]
-	if command != "sync" && command != "sync-activities" && command != "migrate" && command != "migrate-activities" {
-		return fmt.Errorf("unknown command; use migrate, migrate-activities, sync or sync-activities")
+	if command != "sync" && command != "sync-activities" && command != "migrate" && command != "migrate-activities" && command != "migrate-monitoring" {
+		return fmt.Errorf("unknown command; use migrate, migrate-activities, migrate-monitoring, sync or sync-activities")
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(out)
@@ -119,6 +119,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 	if command == "migrate-activities" {
 		return migrateActivities(ctx, conn)
 	}
+	if command == "migrate-monitoring" {
+		return migrateMonitoring(ctx, conn)
+	}
 	c := garmin.NewClient(garmin.BaseURL, httpClient)
 	if err := c.Authenticate(ctx, key); err != nil {
 		return fmt.Errorf("authentication: %w", err)
@@ -128,7 +131,13 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 			return err
 		}
 	}
-	return syncActivitiesRange(ctx, c, conn, start, end, out)
+	if err := syncActivitiesRange(ctx, c, conn, start, end, out); err != nil {
+		return err
+	}
+	if command == "sync" {
+		return syncWeightsRange(ctx, c, conn, start, end, out)
+	}
+	return nil
 }
 
 func recentDaysRange(now time.Time, days int, timezone string, excludeToday bool) (time.Time, time.Time, error) {

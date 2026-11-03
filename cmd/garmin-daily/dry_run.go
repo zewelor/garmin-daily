@@ -82,16 +82,6 @@ func writePrivateJSON(path string, value any) error {
 	return writePrivate(path, append(body, '\n'))
 }
 
-func validateMonitoringSummary(h garmin.Summary) error {
-	if !nonnegative(h.Respiration.Average, h.Respiration.Min, h.Respiration.Max, h.Respiration.Latest) ||
-		!percent(h.PulseOx.Average, h.PulseOx.Min, h.PulseOx.Latest) ||
-		!nonnegative(h.Stress.TotalMillis, h.Stress.RestMillis, h.Stress.ActivityMillis, h.Stress.UncategorizedMillis,
-			h.Stress.LowMillis, h.Stress.MediumMillis, h.Stress.HighMillis) {
-		return fmt.Errorf("monitoring measurement outside supported range")
-	}
-	return nil
-}
-
 // Dry runs never connect to PostgreSQL. Optional artifacts preserve the source
 // responses; the manifest is written only after the full download succeeds.
 func dryRunRange(ctx context.Context, httpClient *http.Client, key string, from, to time.Time, directory string, out io.Writer) error {
@@ -114,9 +104,6 @@ func dryRunRange(ctx context.Context, httpClient *http.Client, key string, from,
 	}
 	d := monitoringData{From: from.Format(time.DateOnly), To: to.Format(time.DateOnly), Days: make([]dayData, 0)}
 	if err := readDays(ctx, c, from, to, func(values dayData) error {
-		if err := validateMonitoringSummary(values.Health); err != nil {
-			return err
-		}
 		d.Days = append(d.Days, values)
 		fmt.Fprintf(out, "day=%s dry_run=true\n", values.Health.Day)
 		return nil
@@ -125,6 +112,9 @@ func dryRunRange(ctx context.Context, httpClient *http.Client, key string, from,
 	}
 	var err error
 	if d.Weights, err = c.WeightMeasurements(ctx, d.From, d.To); err != nil {
+		return fmt.Errorf("weights: %w", err)
+	}
+	if err := validateWeights(d.Weights, d.From, d.To); err != nil {
 		return fmt.Errorf("weights: %w", err)
 	}
 	if d.Zones, err = c.HeartRateZones(ctx); err != nil {

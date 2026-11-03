@@ -42,6 +42,9 @@ func (d dayData) validate(day string) error {
 	if !validDay(day) || h.Day != day || s.Day != day || r.Day != day {
 		return fmt.Errorf("missing or mismatched calendarDate")
 	}
+	if err := validateMonitoringSummary(h); err != nil {
+		return err
+	}
 	if !nonnegative(h.Movement.Steps.Value, h.Calories.Total, h.Calories.Active, h.Calories.Resting,
 		s.Duration, s.Nap, s.Deep, s.Light, s.REM, s.Awake, s.Unmeasurable, r.Weekly, r.Night, r.Baseline.Low, r.Baseline.High, r.Baseline.LowUpper) ||
 		!nonnegative(h.HeartRate.Resting, h.HeartRate.Min, h.HeartRate.Max, h.Intensity.Moderate, h.Intensity.Vigorous, h.Battery.Charged, h.Battery.Drained) ||
@@ -55,6 +58,16 @@ func (d dayData) validate(day string) error {
 	}
 	if s.Start != nil && s.End != nil && s.End.UnixMilli() < s.Start.UnixMilli() {
 		return fmt.Errorf("sleep ends before it starts")
+	}
+	return nil
+}
+
+func validateMonitoringSummary(h garmin.Summary) error {
+	if !nonnegative(h.Respiration.Average, h.Respiration.Min, h.Respiration.Max, h.Respiration.Latest) ||
+		!percent(h.PulseOx.Average, h.PulseOx.Min, h.PulseOx.Latest) ||
+		!nonnegative(h.Stress.TotalMillis, h.Stress.RestMillis, h.Stress.ActivityMillis, h.Stress.UncategorizedMillis,
+			h.Stress.LowMillis, h.Stress.MediumMillis, h.Stress.HighMillis) {
+		return fmt.Errorf("monitoring measurement outside supported range")
 	}
 	return nil
 }

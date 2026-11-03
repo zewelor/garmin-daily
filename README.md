@@ -1,6 +1,6 @@
 # GarminDaily
 
-Sync Garmin Connect health, sleep, HRV and activity summaries to PostgreSQL.
+Sync Garmin Connect health, sleep, HRV, activities and weight measurements to PostgreSQL.
 
 [![CI](https://github.com/zewelor/garmin-daily/actions/workflows/ci.yml/badge.svg)](https://github.com/zewelor/garmin-daily/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/github/go-mod/go-version/zewelor/garmin-daily?logo=go)](go.mod)
@@ -13,9 +13,10 @@ GarminDaily is a small, run-once CLI built around the official **Garmin Connect
 Personal API**. It authenticates, imports an explicit date range and exits.
 Run it manually or schedule it with cron, systemd or a Kubernetes CronJob.
 
-- **Five compact tables** for daily health, sleep and HRV, top-level activities, and workout summaries.
+- **Six compact tables** for daily health, sleep and HRV, top-level activities,
+  workout summaries and weight measurements.
 - **Repeatable imports** that apply corrections and skip unchanged rows.
-- **Atomic writes**: each daily date and the full fetched activity range commit transactionally.
+- **Atomic writes**: each daily date, activity range and weight range commit transactionally.
 - **Inspection before storage**: `sync --dry-run` downloads and validates monitoring data
   without PostgreSQL; optional files retain the original responses.
 - **Small container**: a static Go binary, CA certificates and license in
@@ -23,7 +24,7 @@ Run it manually or schedule it with cron, systemd or a Kubernetes CronJob.
 
 Each database or schema belongs to **one Garmin account**. The application does
 not manage users or run a web server. PostgreSQL stores typed summaries, without
-intraday samples, GPS data, raw API responses, account identifiers or device metadata.
+intraday sensor series, GPS data, raw API responses, account identifiers or device metadata.
 Optional dry-run artifacts retain original responses for private inspection.
 
 ## Quick start
@@ -92,17 +93,18 @@ process manager to supply it.
 
 | Variable | Required by | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | `migrate`, `migrate-activities`, `sync` without `--dry-run`, `sync-activities` | PostgreSQL connection string and TLS settings. |
+| `DATABASE_URL` | Migrations, `sync` without `--dry-run`, `sync-activities` | PostgreSQL connection string and TLS settings. |
 | `GARMIN_API_KEY` | `sync`, `sync-activities` | Garmin Connect Personal API key. |
 | `PGHOST`, `PGUSER`, `PGPASSWORD` | Optional | Standard pgx connection parameters; useful for keeping credentials out of the URL. |
 
 | Command | Behavior |
 | --- | --- |
-| `migrate` | Create the three daily and two activity tables in one transaction. Run once on an empty database/schema. |
+| `migrate` | Create all six tables with monitoring columns in one transaction. Run once on an empty database/schema. |
 | `migrate-activities` | Add the two activity tables transactionally to an existing three-table installation. Run once. |
-| `sync --from YYYY-MM-DD --to YYYY-MM-DD` | Import daily data and activities for an inclusive range of Garmin calendar dates. |
-| `sync --last-days N --timezone IANA_ZONE` | Import daily data and activities for today and the previous `N−1` dates in that timezone. |
-| `sync --last-days N --timezone IANA_ZONE --exclude-today` | Import daily data and activities for yesterday and the previous `N−1` completed dates in that timezone. |
+| `migrate-monitoring` | Add daily respiration/stress columns, activity zone times and the weight table to an existing five-table installation. Run once. |
+| `sync --from YYYY-MM-DD --to YYYY-MM-DD` | Import daily data, activities and weights for an inclusive range of Garmin calendar dates. |
+| `sync --last-days N --timezone IANA_ZONE` | Import daily data, activities and weights for today and the previous `N−1` dates in that timezone. |
+| `sync --last-days N --timezone IANA_ZONE --exclude-today` | Import daily data, activities and weights for yesterday and the previous `N−1` completed dates in that timezone. |
 | `sync-activities --from YYYY-MM-DD --to YYYY-MM-DD` | Import activities only for an inclusive range. |
 | `sync-activities --last-days N --timezone IANA_ZONE [--exclude-today]` | Import activities only for the selected rolling range; useful for backfills. |
 | `sync --dry-run` with either date-range mode | Download and validate monitoring data without database access. Add `--output NEW_DIRECTORY` for private inspection files. |
@@ -114,19 +116,22 @@ explicit `--last-days` range. `--exclude-today` uses local calendar dates, so it
 ends yesterday regardless of the execution time or daylight-saving changes.
 Timezone data is embedded in the binary.
 
-A successful `sync` reports each daily date and then an activity aggregate:
+A successful `sync` reports each daily date, then activity and weight aggregates:
 
 ```text
 day=2026-10-25 changed_rows=3
 activities=4 changed_rows=4
+weights=2 changed_rows=2
 ```
 
 An identical repeat reports `changed_rows=0`. Activity output contains counts
-only, not activity names or IDs. Daily records commit one day at a time. The
+only, not activity names, IDs or body-weight values. Daily records commit one day at a time. The
 activity API pages are all fetched and validated before one transaction writes
 the requested activity range and its exercise snapshots. If activity fetching
 or writing fails, `sync` exits nonzero; already committed daily dates remain,
-and the activity range has no partial writes. Repeat the range to resume. Run
+and the activity range has no partial writes. Weights are fetched and committed
+after activities, in their own range transaction; a failed weight step leaves
+earlier daily/activity commits intact. Repeat the range to resume. Run
 only one writer against the same tables at a time.
 
 ## Inspect data before database import
@@ -155,7 +160,9 @@ health data; keep them outside the repository.
 
 The existing rolling-date flags also work with `--dry-run`. This mode never
 connects to PostgreSQL. Without `--output`, it prints counts and creates no files.
-**The additional metrics are not yet written by normal `sync`.**
+Normal `sync` stores daily respiration and stress durations, activity zone times,
+and each weight measurement's date, UTC timestamp and mass in kg. Zone settings,
+body composition, daily SpO₂, VO₂max and other inspection-only fields are not stored.
 See [dry-run reference](docs/dry-run.md) for units, selected fields and verification
 limits, including discrepancies between Swagger and live weight responses.
 
@@ -163,14 +170,16 @@ limits, including discrepancies between Swagger and live weight responses.
 
 | Table | Contents |
 | --- | --- |
-| `daily_health` | Steps, distance, calories, heart rate, intensity, stress and Body Battery. |
+| `daily_health` | Steps, distance, calories, heart rate, intensity, stress levels/durations, daily respiration and Body Battery. |
 | `daily_sleep` | Sleep timestamps, duration, stages, naps, score and overnight averages. |
 | `daily_hrv` | Nightly and weekly HRV, status and baseline values reported by Garmin. |
-| `activities` | One row per Garmin activity ID, including source-local date and UTC start instant. |
+| `activities` | One row per Garmin activity ID, including source-local date, UTC start instant and seconds in HR zones 1–5. |
 | `activity_exercises` | Indexed workout summary elements attached to an activity. |
+| `weight_measurements` | Each measurement's UTC timestamp, Garmin date and body mass in kg. |
 
 Daily tables use `day DATE` as the primary key. Activity rows use Garmin's
-`activity_id`; exercise rows use `(activity_id, exercise_index)`. Missing values
+`activity_id`; exercise rows use `(activity_id, exercise_index)` and weights use
+their UTC measurement timestamp. Missing values
 remain SQL `NULL`; zero remains zero. Decimal measurements retain their source
 precision without passing through `float64`. Each day's three responses are
 fetched and validated before a single database transaction writes them.

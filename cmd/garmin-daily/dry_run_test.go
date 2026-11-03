@@ -37,7 +37,7 @@ func TestDryRunCLIFlags(t *testing.T) {
 		{"explicitly disabled dry run", []string{"sync", "--from", "2026-11-02", "--to", "2026-11-02", "--dry-run=false"}, "DATABASE_URL is required"},
 		{"disabled dry run with output", []string{"sync", "--from", "2026-11-02", "--to", "2026-11-02", "--dry-run=false", "--output", "unused"}, "--output requires --dry-run"},
 		{"empty explicit output", []string{"sync", "--from", "2026-11-02", "--to", "2026-11-02", "--dry-run", "--output="}, "--output must not be empty"},
-		{"removed fetch command", []string{"fetch"}, "unknown command; use migrate, migrate-activities, sync or sync-activities"},
+		{"removed fetch command", []string{"fetch"}, "unknown command; use migrate, migrate-activities, migrate-monitoring, sync or sync-activities"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := run(context.Background(), tc.args, func(key string) string {

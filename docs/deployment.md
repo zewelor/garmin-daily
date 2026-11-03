@@ -12,12 +12,12 @@ secret manager or GitOps system.
 2. Supply `DATABASE_URL` and `GARMIN_API_KEY` through your secret manager or
    process environment. Keep real values out of Git and command-line arguments.
 3. Pin `ghcr.io/zewelor/garmin-daily` to the digest in the publication job summary.
-4. Run `migrate` once against the empty database/schema. It creates all five
+4. Run `migrate` once against the empty database/schema. It creates all six
    tables in one transaction. Running it again is an error; do not include it
    in each scheduled sync.
 5. Import an explicit range with `sync --from YYYY-MM-DD --to YYYY-MM-DD`, check
-   the daily dates and activity summaries, then repeat it. With unchanged source
-   data, daily and activity writes should report `changed_rows=0`.
+   the daily dates, activity and weight summaries, then repeat it. With unchanged
+   source data, all writes should report `changed_rows=0`.
 
 Use the connection string's `search_path` parameter to select a schema. pgx also
 accepts `PGHOST`, `PGUSER` and `PGPASSWORD`, so credentials need not be embedded
@@ -26,14 +26,24 @@ Compose is for local testing only.
 
 ## Upgrade an existing database
 
-An installation created by an earlier GarminDaily release has the three daily
-tables. Before running the new `sync`, execute `migrate-activities` once with a
-role allowed to create tables in the selected schema. This creates
-`activities` and `activity_exercises` together in one transaction and leaves
-daily tables and rows untouched. The command fails if either activity table
-already exists; do not rerun it after success. Do not run the fresh-install
-`migrate` against an existing daily schema because that command creates all
-five tables and deliberately fails on existing tables.
+An installation with only the three daily tables must first run
+`migrate-activities` once. This creates `activities` and `activity_exercises`
+together and leaves daily data untouched. If those tables already exist, skip
+that completed migration.
+
+Then run `migrate-monitoring` once with a schema-owner role. It adds daily
+respiration and stress-duration columns, activity HR-zone seconds and
+`weight_measurements` in a single transaction. Existing rows retain their
+values and the new columns start as `NULL`; re-import a date range to populate
+them. The role needs permission to alter existing tables and create the new
+table. Grant the runtime writer access to `weight_measurements` and grant
+`SELECT` to any existing read-only role, using the same roles as the other tables.
+
+Both upgrade commands deliberately fail on repeated execution or conflicting
+schema objects. Inspect an unexpected schema rather than rerunning migrations.
+Do not run fresh-install `migrate` against an existing schema.
+Run the monitoring upgrade before using either `sync` or `sync-activities`
+from this release; both write the new activity zone columns.
 
 If an activity table already exists from a prior attempt, inspect the schema
 before syncing. The migration is transactional, so a failed execution does not
@@ -50,9 +60,10 @@ garmin-daily sync --last-days 3 --timezone Europe/London
 `sync` imports daily rows first, committing each date, then synchronizes all
 activities whose source-local start date falls within the same inclusive range.
 It fetches and validates every activity page before writing, then commits the
-activity summaries and exercise snapshots in one range transaction. An API or
-database failure in the activity step exits nonzero while earlier daily rows
-remain committed; the activity range itself has no partial writes.
+activity summaries and exercise snapshots in one range transaction. Finally,
+it fetches all weight measurements for that range and upserts them in a separate
+transaction. An API or database failure exits nonzero while earlier committed
+steps remain; each activity/weight batch has no partial writes.
 
 To backfill activities without repeating daily requests, run for example:
 
