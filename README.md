@@ -16,8 +16,8 @@ Run it manually or schedule it with cron, systemd or a Kubernetes CronJob.
 - **Three daily tables** for health, sleep and HRV, with one row per date.
 - **Repeatable imports** that apply corrections and skip unchanged rows.
 - **Atomic daily writes**: a failed day leaves no partial records.
-- **Inspection before storage**: fetch expanded monitoring data into private
-  files without connecting to PostgreSQL.
+- **Inspection before storage**: `sync --dry-run` downloads and validates data
+  without connecting to PostgreSQL; optional files retain the original responses.
 - **Small container**: a static Go binary, CA certificates and license in
   `scratch`, running as UID/GID `65532:65532`; database sync requires no writable filesystem.
 
@@ -81,8 +81,8 @@ process manager to supply it.
 
 | Variable | Required by | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | `migrate`, `sync` | PostgreSQL connection string and TLS settings. |
-| `GARMIN_API_KEY` | `sync`, `fetch` | Garmin Connect Personal API key. |
+| `DATABASE_URL` | `migrate`, `sync` without `--dry-run` | PostgreSQL connection string and TLS settings. |
+| `GARMIN_API_KEY` | `sync` | Garmin Connect Personal API key. |
 | `PGHOST`, `PGUSER`, `PGPASSWORD` | Optional | Standard pgx connection parameters; useful for keeping credentials out of the URL. |
 
 | Command | Behavior |
@@ -91,7 +91,7 @@ process manager to supply it.
 | `sync --from YYYY-MM-DD --to YYYY-MM-DD` | Import an inclusive range of Garmin calendar dates. |
 | `sync --last-days N --timezone IANA_ZONE` | Import today and the previous `N−1` dates in the chosen timezone. |
 | `sync --last-days N --timezone IANA_ZONE --exclude-today` | Import yesterday and the previous `N−1` completed dates in the chosen timezone. |
-| `fetch --from YYYY-MM-DD --to YYYY-MM-DD --output NEW_DIRECTORY` | Download monitoring data and original responses to private files, without database access. |
+| `sync --dry-run` with either date-range mode | Download and validate monitoring data without database access. Add `--output NEW_DIRECTORY` to retain private inspection files. |
 
 There is no default date range. The two range modes cannot be combined.
 `--last-days` must be positive and requires a named IANA timezone or `UTC`;
@@ -112,7 +112,7 @@ Run only one writer against the same tables at a time.
 
 ## Inspect data before database import
 
-`fetch` reads health, sleep, HRV, every weight measurement, current heart-rate
+`sync --dry-run` reads health, sleep, HRV, every weight measurement, current heart-rate
 zone settings and all pages of recorded activities. Activity metrics include
 time in heart-rate zones, intensity minutes, calories, Training Effect,
 training load and VO₂max when Garmin supplies them. The health summary also
@@ -120,20 +120,24 @@ includes daily respiration, SpO₂ and the distribution of stress durations.
 
 ```sh
 # Supply GARMIN_API_KEY through the environment; DATABASE_URL is not needed.
-garmin-daily fetch --from 2026-10-25 --to 2026-10-31 \
+garmin-daily sync --dry-run --from 2026-10-25 --to 2026-10-31
+
+# Optionally keep original responses and decoded data for inspection.
+garmin-daily sync --dry-run --from 2026-10-25 --to 2026-10-31 \
   --output /tmp/garmin-inspection
 ```
 
-The output directory must not exist. It is created with mode `0700`, with
+With `--output`, the directory must not exist. It is created with mode `0700`, with
 `0600` files: original GET responses, selected decoded data in `data.json`,
 and a final `manifest.json` containing request paths, statuses and SHA-256 hashes.
-API keys, bearer tokens and request headers are not saved. A failed fetch keeps
+API keys, bearer tokens and request headers are not saved. A failed dry run keeps
 its diagnostic files without a success manifest. These files contain personal
 health data; keep them outside the repository.
 
-The existing rolling-date flags also work with `fetch`. This command never
-connects to PostgreSQL. **The additional metrics are not yet written by `sync`.**
-See [fetch reference](docs/fetch.md) for units, selected fields and verification
+The existing rolling-date flags also work with `--dry-run`. This mode never
+connects to PostgreSQL. Without `--output`, it prints counts and creates no files.
+**The additional metrics are not yet written by normal `sync`.**
+See [dry-run reference](docs/dry-run.md) for units, selected fields and verification
 limits, including discrepancies between Swagger and live weight responses.
 
 ## Data model

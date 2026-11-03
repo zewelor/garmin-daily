@@ -15,21 +15,47 @@ import (
 	"time"
 )
 
-func TestFetchCLIHasNoDatabaseRequirement(t *testing.T) {
-	err := run(context.Background(), []string{"fetch", "--from", "2026-11-02", "--to", "2026-11-02", "--output", filepath.Join(t.TempDir(), "download")}, func(key string) string {
+func TestDryRunCLIHasNoDatabaseRequirement(t *testing.T) {
+	err := run(context.Background(), []string{"sync", "--dry-run", "--from", "2026-11-02", "--to", "2026-11-02"}, func(key string) string {
 		if key == "DATABASE_URL" {
-			t.Fatal("fetch accessed database configuration")
+			t.Fatal("dry run accessed database configuration")
 		}
 		return ""
 	}, io.Discard)
 	if err == nil || err.Error() != "GARMIN_API_KEY is required" {
-		t.Fatalf("unexpected fetch error: %v", err)
+		t.Fatalf("unexpected dry run error: %v", err)
+	}
+}
+
+func TestDryRunCLIFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"output requires dry run", []string{"sync", "--from", "2026-11-02", "--to", "2026-11-02", "--output", "unused"}, "--output requires --dry-run"},
+		{"explicitly disabled dry run", []string{"sync", "--from", "2026-11-02", "--to", "2026-11-02", "--dry-run=false"}, "DATABASE_URL is required"},
+		{"disabled dry run with output", []string{"sync", "--from", "2026-11-02", "--to", "2026-11-02", "--dry-run=false", "--output", "unused"}, "--output requires --dry-run"},
+		{"empty explicit output", []string{"sync", "--from", "2026-11-02", "--to", "2026-11-02", "--dry-run", "--output="}, "--output must not be empty"},
+		{"removed fetch command", []string{"fetch"}, "unknown command; use migrate or sync"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := run(context.Background(), tc.args, func(key string) string {
+				if key == "GARMIN_API_KEY" {
+					return "test-secret"
+				}
+				return ""
+			}, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
 // Simulates Garmin's real numeric timestamps, missing optional metrics, two
 // weigh-ins on one day, and a raw field outside our selected monitoring scope.
-func TestFetchArtifactsEndToEnd(t *testing.T) {
+func TestDryRunArtifactsEndToEnd(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "personal-api-key/token") {
 			if r.Header.Get("Authorization") != "ApiKey test-secret" {
@@ -71,10 +97,21 @@ func TestFetchArtifactsEndToEnd(t *testing.T) {
 		r.URL.Host = strings.TrimPrefix(s.URL, "http://")
 		return base.RoundTrip(r)
 	})
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = h.Transport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	getenv := func(key string) string {
+		if key == "GARMIN_API_KEY" {
+			return "test-secret"
+		}
+		t.Fatalf("dry run accessed configuration %s", key)
+		return ""
+	}
 	dir := filepath.Join(t.TempDir(), "download")
 	day, _ := time.Parse(time.DateOnly, "2026-11-02")
 	var out bytes.Buffer
-	if err := fetchFiles(context.Background(), h, "test-secret", day, day, dir, &out); err != nil {
+	args := []string{"sync", "--dry-run", "--from", "2026-11-02", "--to", "2026-11-02"}
+	if err := run(context.Background(), append(args, "--output", dir), getenv, &out); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "days=1 weights=2 activities=1 zone_configs=0") {
@@ -87,7 +124,7 @@ func TestFetchArtifactsEndToEnd(t *testing.T) {
 	if !bytes.Contains(data, []byte("82345.67890123456789")) || !bytes.Contains(data, []byte("-500.125")) {
 		t.Fatal("weight decimal precision or signed delta lost")
 	}
-	var got fetchData
+	var got monitoringData
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -132,8 +169,15 @@ func TestFetchArtifactsEndToEnd(t *testing.T) {
 	if info.Mode().Perm() != 0700 {
 		t.Fatal("unsafe output directory permissions")
 	}
-	if err := fetchFiles(context.Background(), h, "test-secret", day, day, dir, io.Discard); err == nil {
+	if err := dryRunRange(context.Background(), h, "test-secret", day, day, dir, io.Discard); err == nil {
 		t.Fatal("overwrote existing output directory")
+	}
+	out.Reset()
+	if err := run(context.Background(), args, getenv, &out); err != nil {
+		t.Fatalf("dry run without output directory: %v", err)
+	}
+	if !strings.Contains(out.String(), "dry_run=true days=1 weights=2 activities=1 zone_configs=0") {
+		t.Fatalf("unexpected dry run summary: %s", &out)
 	}
 }
 
@@ -141,7 +185,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestFetchFailuresLeaveNoSuccessManifest(t *testing.T) {
+func TestDryRunFailuresLeaveNoSuccessManifest(t *testing.T) {
 	for _, tc := range []struct {
 		name, summary string
 		sleepStatus   int
@@ -173,12 +217,12 @@ func TestFetchFailuresLeaveNoSuccessManifest(t *testing.T) {
 			if tc.sleepStatus == 401 {
 				want = "sleep: Garmin HTTP 401"
 			}
-			if err := fetchFiles(context.Background(), h, "test-secret", day, day, dir, io.Discard); err == nil || !strings.Contains(err.Error(), want) {
-				t.Fatalf("fetch failed for the wrong reason: got %v, want %q", err, want)
+			if err := dryRunRange(context.Background(), h, "test-secret", day, day, dir, io.Discard); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("dry run failed for the wrong reason: got %v, want %q", err, want)
 			}
 			for _, name := range []string{"data.json", "manifest.json"} {
 				if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
-					t.Fatalf("failed fetch produced %s", name)
+					t.Fatalf("failed dry run produced %s", name)
 				}
 			}
 			raw, err := filepath.Glob(filepath.Join(dir, "response-*.json"))

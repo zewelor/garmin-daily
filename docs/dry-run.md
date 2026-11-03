@@ -1,10 +1,15 @@
-# Fetch reference
+# Dry-run reference
 
-`fetch` is the inspection stage before adding new PostgreSQL tables or columns.
-It uses the official Personal API and the same date-range flags as `sync`, with
-a required `--output NEW_DIRECTORY`. It does not read `DATABASE_URL`, connect to
-a database, migrate a schema or write database rows. `sync` continues to write
-the existing three daily tables and their existing columns.
+`sync --dry-run` downloads and validates monitoring data without reading
+`DATABASE_URL`, connecting to a database or writing database rows. It uses the
+same date-range parsing and daily download loop as normal `sync`. It prints
+daily progress and summary counts; optional `--output NEW_DIRECTORY` keeps
+inspection artifacts. `--output` is accepted only with `--dry-run`.
+
+The additional monitoring metrics are still at the inspection stage before
+adding PostgreSQL tables or columns. Normal `sync` continues to write the
+existing three daily tables and their existing columns. The dry run does not
+test database connectivity, permissions or SQL writes.
 
 ## Selected monitoring fields
 
@@ -37,7 +42,7 @@ an empty or `null` HTTP 200 response is an error.
 The [official Swagger](https://developer.garmin.com/gc-developer-program/personal/swagger-docs/)
 describes `DateWeightDTO.weight` as kilograms. A controlled live measurement,
 checked against the account holder's manually entered kg value, was instead
-returned in **grams**. `fetch` preserves the original `weight` value; it does
+returned in **grams**. The dry run preserves the original `weight` value; it does
 not silently divide it. Interpret the verified source value as grams when
 reviewing it, and explicitly convert it when implementing database storage.
 
@@ -56,6 +61,9 @@ device-specific behavior. Recorded sessions may supply different subsets of
 Training Effect and time-in-zone metrics.
 
 ## Artifacts and verification
+
+Artifacts are written only when `--output` is supplied. The directory must not
+exist; it is created with mode `0700` and its files with mode `0600`.
 
 - `response-NNN.json`: exact GET response bytes. HTTP 204 files are empty. Raw
   responses retain fields outside the selected monitoring scope.

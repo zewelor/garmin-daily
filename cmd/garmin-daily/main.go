@@ -19,22 +19,20 @@ import (
 
 func run(ctx context.Context, args []string, getenv func(string) string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: garmin-daily migrate | sync --from YYYY-MM-DD --to YYYY-MM-DD | sync --last-days N --timezone IANA_ZONE [--exclude-today] | fetch --from YYYY-MM-DD --to YYYY-MM-DD --output NEW_DIRECTORY")
+		return fmt.Errorf("usage: garmin-daily migrate | sync (--from YYYY-MM-DD --to YYYY-MM-DD | --last-days N --timezone IANA_ZONE [--exclude-today]) [--dry-run [--output NEW_DIRECTORY]]")
 	}
 	command := args[0]
-	readsData := command == "sync" || command == "fetch"
-	if !readsData && command != "migrate" {
-		return fmt.Errorf("unknown command; use migrate, sync or fetch")
+	if command != "sync" && command != "migrate" {
+		return fmt.Errorf("unknown command; use migrate or sync")
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(out)
 	var from, to, timezone, output string
 	var lastDays int
-	var excludeToday bool
-	if command == "fetch" {
-		flags.StringVar(&output, "output", "", "new private directory for fetched data (required)")
-	}
-	if readsData {
+	var excludeToday, dryRun bool
+	if command == "sync" {
+		flags.BoolVar(&dryRun, "dry-run", false, "download and validate without connecting to PostgreSQL")
+		flags.StringVar(&output, "output", "", "optional new private directory for --dry-run artifacts")
 		flags.StringVar(&from, "from", "", "first Garmin calendar date (inclusive)")
 		flags.StringVar(&to, "to", "", "last Garmin calendar date (inclusive)")
 		flags.IntVar(&lastDays, "last-days", 0, "number of Garmin calendar dates ending today")
@@ -48,8 +46,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 		return fmt.Errorf("unexpected positional arguments")
 	}
 	var start, end time.Time
-	if readsData {
-		var absolute, rolling, zoned, excludeTodaySet bool
+	if command == "sync" {
+		var absolute, rolling, zoned, excludeTodaySet, outputSet bool
 		flags.Visit(func(f *flag.Flag) {
 			switch f.Name {
 			case "from", "to":
@@ -60,8 +58,16 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 				zoned = true
 			case "exclude-today":
 				excludeTodaySet = true
+			case "output":
+				outputSet = true
 			}
 		})
+		if outputSet && !dryRun {
+			return fmt.Errorf("--output requires --dry-run")
+		}
+		if outputSet && output == "" {
+			return fmt.Errorf("--output must not be empty")
+		}
 		if rolling && absolute {
 			return fmt.Errorf("--last-days cannot be combined with --from or --to")
 		}
@@ -86,12 +92,12 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 		}
 	}
 	key := strings.TrimSpace(getenv("GARMIN_API_KEY"))
-	if readsData && key == "" {
+	if command == "sync" && key == "" {
 		return fmt.Errorf("GARMIN_API_KEY is required")
 	}
 	httpClient := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	if command == "fetch" {
-		return fetchFiles(ctx, httpClient, key, start, end, output, out)
+	if dryRun {
+		return dryRunRange(ctx, httpClient, key, start, end, output, out)
 	}
 	dsn := getenv("DATABASE_URL")
 	if strings.TrimSpace(dsn) == "" {
