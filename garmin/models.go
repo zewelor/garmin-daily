@@ -32,16 +32,14 @@ type Summary struct {
 		Vigorous *int16 `json:"vigorous"`
 	} `json:"intensityMinutes"`
 	Stress struct {
-		Average             *int16  `json:"avgLevel"`
-		Max                 *int16  `json:"maxLevel"`
-		TotalMillis         *int64  `json:"totalDurationInMillis"`
-		RestMillis          *int64  `json:"restDurationInMillis"`
-		ActivityMillis      *int64  `json:"activityDurationInMillis"`
-		UncategorizedMillis *int64  `json:"uncategorizedDurationInMillis"`
-		LowMillis           *int64  `json:"lowStressDurationInMillis"`
-		MediumMillis        *int64  `json:"mediumStressDurationInMillis"`
-		HighMillis          *int64  `json:"highStressDurationInMillis"`
-		Qualifier           *string `json:"qualifier"`
+		Average             *int16 `json:"avgLevel"`
+		Max                 *int16 `json:"maxLevel"`
+		RestMillis          *int64 `json:"restDurationInMillis"`
+		ActivityMillis      *int64 `json:"activityDurationInMillis"`
+		UncategorizedMillis *int64 `json:"uncategorizedDurationInMillis"`
+		LowMillis           *int64 `json:"lowStressDurationInMillis"`
+		MediumMillis        *int64 `json:"mediumStressDurationInMillis"`
+		HighMillis          *int64 `json:"highStressDurationInMillis"`
 	} `json:"stress"`
 	Respiration struct {
 		Average *int16 `json:"avgValue"`
@@ -49,11 +47,6 @@ type Summary struct {
 		Max     *int16 `json:"maxValue"`
 		Latest  *int16 `json:"latestValue"`
 	} `json:"respiration"`
-	PulseOx struct {
-		Average *int16 `json:"avgValue"`
-		Min     *int16 `json:"minValue"`
-		Latest  *int16 `json:"latestValue"`
-	} `json:"pulseOx"`
 	Battery struct {
 		Min     *int16 `json:"minValue"`
 		Max     *int16 `json:"maxValue"`

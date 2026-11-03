@@ -11,38 +11,12 @@ import (
 	"time"
 )
 
-// WeightMeasurement preserves source values. The live API returns weight in
-// grams and timestamps in epoch milliseconds, despite the Swagger kg/string types.
-// Composition units have not yet been verified against a populated live response.
+// WeightMeasurement contains the source fields persisted by the application.
+// Garmin returns weight in grams and timestamps in epoch milliseconds.
 type WeightMeasurement struct {
-	Day          string       `json:"calendarDate"`
-	Date         *int64       `json:"date"` // Local wall-clock milliseconds, not a UTC instant.
-	Timestamp    *EpochMillis `json:"timestampGMT"`
-	Weight       *json.Number `json:"weight"`
-	Delta        *json.Number `json:"weightDelta"`
-	BMI          *json.Number `json:"bmi"`
-	BodyFat      *json.Number `json:"bodyFat"`
-	BodyWater    *json.Number `json:"bodyWater"`
-	BoneMass     *json.Number `json:"boneMass"`
-	MuscleMass   *json.Number `json:"muscleMass"`
-	Physique     *int32       `json:"physiqueRating"`
-	VisceralFat  *json.Number `json:"visceralFat"`
-	MetabolicAge *json.Number `json:"metabolicAge"`
-}
-
-// HeartRateZoneConfig describes current configuration, not historical time in zones.
-type HeartRateZoneConfig struct {
-	Sport             string `json:"sport"`
-	Method            string `json:"trainingMethod"`
-	RestingHeartRate  *int32 `json:"restingHeartRateUsed"`
-	LactateThreshold  *int32 `json:"lactateThresholdHeartRateUsed"`
-	MaxHeartRate      *int32 `json:"maxHeartRateUsed"`
-	RestingAutoUpdate *bool  `json:"restingHrAutoUpdateUsed"`
-	Zone1Floor        *int32 `json:"zone1Floor"`
-	Zone2Floor        *int32 `json:"zone2Floor"`
-	Zone3Floor        *int32 `json:"zone3Floor"`
-	Zone4Floor        *int32 `json:"zone4Floor"`
-	Zone5Floor        *int32 `json:"zone5Floor"`
+	Day       string       `json:"calendarDate"`
+	Timestamp *EpochMillis `json:"timestampGMT"`
+	Weight    *json.Number `json:"weight"`
 }
 
 // Activity is a recorded session, including child sessions of multisport events.
@@ -52,29 +26,19 @@ type Activity struct {
 	ID   int64  `json:"activityId"`
 	Name string `json:"activityName"`
 	Type struct {
-		ID  *int64 `json:"typeId"`
 		Key string `json:"typeKey"`
 	} `json:"activityType"`
 	StartLocal        string              `json:"startTimeLocal"`
 	StartGMT          string              `json:"startTimeGMT"`
-	Parent            *bool               `json:"isParent"`
 	ParentID          *int64              `json:"parentId"`
 	Duration          *json.Number        `json:"duration"`
-	MovingDuration    *json.Number        `json:"movingDuration"`
-	ElapsedDuration   *json.Number        `json:"elapsedDuration"`
 	Distance          *json.Number        `json:"distance"`
 	Calories          *json.Number        `json:"calories"`
-	BMRCalories       *json.Number        `json:"bmrCalories"`
 	HeartRateAverage  *json.Number        `json:"averageHR"`
 	HeartRateMax      *json.Number        `json:"maxHR"`
-	ModerateMinutes   *int32              `json:"moderateIntensityMinutes"`
-	VigorousMinutes   *int32              `json:"vigorousIntensityMinutes"`
 	TrainingLoad      *json.Number        `json:"activityTrainingLoad"`
 	AerobicEffect     *json.Number        `json:"aerobicTrainingEffect"`
 	AnaerobicEffect   *json.Number        `json:"anaerobicTrainingEffect"`
-	EffectLabel       *string             `json:"trainingEffectLabel"`
-	TrainingStress    *json.Number        `json:"trainingStressScore"`
-	VO2Max            *json.Number        `json:"vO2MaxValue"`
 	Zone1Seconds      *json.Number        `json:"hrTimeInZone_1"`
 	Zone2Seconds      *json.Number        `json:"hrTimeInZone_2"`
 	Zone3Seconds      *json.Number        `json:"hrTimeInZone_3"`
@@ -131,34 +95,8 @@ func (c *Client) WeightMeasurements(ctx context.Context, from, to string) ([]Wei
 		return nil, err
 	}
 	for _, w := range result {
-		if !calendarDate(w.Day) || w.Day < from || w.Day > to || w.Timestamp == nil || w.Weight == nil ||
-			!nonnegativeNumbers(w.Weight, w.BMI, w.BodyFat, w.BodyWater, w.BoneMass, w.MuscleMass, w.VisceralFat, w.MetabolicAge) {
+		if !calendarDate(w.Day) || w.Day < from || w.Day > to || w.Timestamp == nil || w.Weight == nil || !nonnegativeNumbers(w.Weight) {
 			return nil, fmt.Errorf("invalid weight measurement or calendarDate")
-		}
-	}
-	return result, nil
-}
-
-// HeartRateZones reads existing configuration without generating defaults.
-func (c *Client) HeartRateZones(ctx context.Context) ([]HeartRateZoneConfig, error) {
-	var result []HeartRateZoneConfig
-	if _, err := c.get(ctx, "/biometric-service/heartRateZones/v2?generateDefaults=false", &result, false); err != nil {
-		return nil, err
-	}
-	seen := make(map[string]bool)
-	for _, z := range result {
-		if z.Sport == "" || seen[z.Sport] {
-			return nil, fmt.Errorf("missing or duplicate heart rate zone sport")
-		}
-		seen[z.Sport] = true
-		var previous int32
-		for _, floor := range []*int32{z.Zone1Floor, z.Zone2Floor, z.Zone3Floor, z.Zone4Floor, z.Zone5Floor} {
-			if floor != nil {
-				if *floor <= previous {
-					return nil, fmt.Errorf("invalid heart rate zone boundaries")
-				}
-				previous = *floor
-			}
 		}
 	}
 	return result, nil
@@ -194,11 +132,10 @@ func (c *Client) Activities(ctx context.Context, from, to string) ([]Activity, e
 			if _, ok := seen[a.ID]; ok {
 				return nil, fmt.Errorf("duplicate activity ID while paginating")
 			}
-			if !nonnegativeNumbers(a.Duration, a.MovingDuration, a.ElapsedDuration, a.Distance, a.Calories, a.BMRCalories,
+			if !nonnegativeNumbers(a.Duration, a.Distance, a.Calories,
 				a.HeartRateAverage, a.HeartRateMax, a.TrainingLoad, a.AerobicEffect, a.AnaerobicEffect,
-				a.TrainingStress, a.VO2Max, a.Zone1Seconds, a.Zone2Seconds, a.Zone3Seconds, a.Zone4Seconds, a.Zone5Seconds,
+				a.Zone1Seconds, a.Zone2Seconds, a.Zone3Seconds, a.Zone4Seconds, a.Zone5Seconds,
 				a.AverageSpeed, a.MaxDepth) ||
-				(a.ModerateMinutes != nil && *a.ModerateMinutes < 0) || (a.VigorousMinutes != nil && *a.VigorousMinutes < 0) ||
 				(a.TotalSets != nil && *a.TotalSets < 0) || (a.TotalReps != nil && *a.TotalReps < 0) ||
 				(a.BodyBatteryChange != nil && (*a.BodyBatteryChange < -100 || *a.BodyBatteryChange > 100)) {
 				return nil, fmt.Errorf("invalid activity measurement")

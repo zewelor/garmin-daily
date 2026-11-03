@@ -19,23 +19,20 @@ import (
 
 func run(ctx context.Context, args []string, getenv func(string) string, out io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: garmin-daily migrate | migrate-activities | migrate-monitoring | sync [--dry-run [--output NEW_DIRECTORY]] | sync-activities [date range flags]")
+		return fmt.Errorf("usage: garmin-daily migrate | sync [--dry-run] | sync-activities [--dry-run] [date range flags]")
 	}
 	command := args[0]
-	if command != "sync" && command != "sync-activities" && command != "migrate" && command != "migrate-activities" && command != "migrate-monitoring" {
-		return fmt.Errorf("unknown command; use migrate, migrate-activities, migrate-monitoring, sync or sync-activities")
+	if command != "sync" && command != "sync-activities" && command != "migrate" {
+		return fmt.Errorf("unknown command; use migrate, sync or sync-activities")
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(out)
-	var from, to, timezone, output string
+	var from, to, timezone string
 	var lastDays int
 	var excludeToday, dryRun bool
 	syncCommand := command == "sync" || command == "sync-activities"
-	if command == "sync" {
-		flags.BoolVar(&dryRun, "dry-run", false, "download and validate without connecting to PostgreSQL")
-		flags.StringVar(&output, "output", "", "optional new private directory for --dry-run artifacts")
-	}
 	if syncCommand {
+		flags.BoolVar(&dryRun, "dry-run", false, "print incoming PostgreSQL rows without connecting to the database")
 		flags.StringVar(&from, "from", "", "first Garmin calendar date (inclusive)")
 		flags.StringVar(&to, "to", "", "last Garmin calendar date (inclusive)")
 		flags.IntVar(&lastDays, "last-days", 0, "number of Garmin calendar dates ending today")
@@ -50,7 +47,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 	}
 	var start, end time.Time
 	if syncCommand {
-		var absolute, rolling, zoned, excludeTodaySet, outputSet bool
+		var absolute, rolling, zoned, excludeTodaySet bool
 		flags.Visit(func(f *flag.Flag) {
 			switch f.Name {
 			case "from", "to":
@@ -61,16 +58,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 				zoned = true
 			case "exclude-today":
 				excludeTodaySet = true
-			case "output":
-				outputSet = true
 			}
 		})
-		if outputSet && !dryRun {
-			return fmt.Errorf("--output requires --dry-run")
-		}
-		if outputSet && output == "" {
-			return fmt.Errorf("--output must not be empty")
-		}
 		if rolling && absolute {
 			return fmt.Errorf("--last-days cannot be combined with --from or --to")
 		}
@@ -98,44 +87,42 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 	if syncCommand && key == "" {
 		return fmt.Errorf("GARMIN_API_KEY is required")
 	}
+	var conn *pgx.Conn
+	if !dryRun {
+		dsn := getenv("DATABASE_URL")
+		if strings.TrimSpace(dsn) == "" {
+			return fmt.Errorf("DATABASE_URL is required")
+		}
+		connectCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		var err error
+		conn, err = pgx.Connect(connectCtx, dsn)
+		cancel()
+		if err != nil {
+			return databaseError("connect", err)
+		}
+		defer conn.Close(context.Background())
+		if command == "migrate" {
+			return migrate(ctx, conn)
+		}
+		if err := checkDatabaseVersion(ctx, conn); err != nil {
+			return err
+		}
+	}
 	httpClient := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	if dryRun {
-		return dryRunRange(ctx, httpClient, key, start, end, output, out)
-	}
-	dsn := getenv("DATABASE_URL")
-	if strings.TrimSpace(dsn) == "" {
-		return fmt.Errorf("DATABASE_URL is required")
-	}
-	connectCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	conn, err := pgx.Connect(connectCtx, dsn)
-	cancel()
-	if err != nil {
-		return databaseError("connect", err)
-	}
-	defer conn.Close(context.Background())
-	if command == "migrate" {
-		return migrate(ctx, conn)
-	}
-	if command == "migrate-activities" {
-		return migrateActivities(ctx, conn)
-	}
-	if command == "migrate-monitoring" {
-		return migrateMonitoring(ctx, conn)
-	}
 	c := garmin.NewClient(garmin.BaseURL, httpClient)
 	if err := c.Authenticate(ctx, key); err != nil {
 		return fmt.Errorf("authentication: %w", err)
 	}
 	if command == "sync" {
-		if err := syncRange(ctx, c, conn, start, end, out); err != nil {
+		if err := syncRange(ctx, c, conn, start, end, dryRun, out); err != nil {
 			return err
 		}
 	}
-	if err := syncActivitiesRange(ctx, c, conn, start, end, out); err != nil {
+	if err := syncActivitiesRange(ctx, c, conn, start, end, dryRun, out); err != nil {
 		return err
 	}
 	if command == "sync" {
-		return syncWeightsRange(ctx, c, conn, start, end, out)
+		return syncWeightsRange(ctx, c, conn, start, end, dryRun, out)
 	}
 	return nil
 }

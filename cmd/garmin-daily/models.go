@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/big"
 	"time"
 
 	"github.com/zewelor/garmin-daily/garmin"
@@ -56,6 +58,14 @@ func (d dayData) validate(day string) error {
 			return err
 		}
 	}
+	for _, v := range []*json.Number{s.Stress, s.SpO2} {
+		if v != nil {
+			value, ok := new(big.Rat).SetString(v.String())
+			if !ok || value.Cmp(big.NewRat(100, 1)) > 0 {
+				return fmt.Errorf("sleep percentage outside supported range")
+			}
+		}
+	}
 	if s.Start != nil && s.End != nil && s.End.UnixMilli() < s.Start.UnixMilli() {
 		return fmt.Errorf("sleep ends before it starts")
 	}
@@ -64,10 +74,15 @@ func (d dayData) validate(day string) error {
 
 func validateMonitoringSummary(h garmin.Summary) error {
 	if !nonnegative(h.Respiration.Average, h.Respiration.Min, h.Respiration.Max, h.Respiration.Latest) ||
-		!percent(h.PulseOx.Average, h.PulseOx.Min, h.PulseOx.Latest) ||
-		!nonnegative(h.Stress.TotalMillis, h.Stress.RestMillis, h.Stress.ActivityMillis, h.Stress.UncategorizedMillis,
+		!nonnegative(h.Stress.RestMillis, h.Stress.ActivityMillis, h.Stress.UncategorizedMillis,
 			h.Stress.LowMillis, h.Stress.MediumMillis, h.Stress.HighMillis) {
 		return fmt.Errorf("monitoring measurement outside supported range")
+	}
+	for _, duration := range []*int64{h.Stress.RestMillis, h.Stress.ActivityMillis, h.Stress.UncategorizedMillis,
+		h.Stress.LowMillis, h.Stress.MediumMillis, h.Stress.HighMillis} {
+		if duration != nil && *duration > math.MaxInt32 {
+			return fmt.Errorf("stress duration exceeds PostgreSQL integer range")
+		}
 	}
 	return nil
 }

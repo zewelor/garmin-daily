@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -15,9 +16,65 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/zewelor/garmin-daily/garmin"
 )
+
+func TestIntegrationDryRunMatchesDatabaseRows(t *testing.T) {
+	ctx := context.Background()
+	conn := testDatabase(t)
+	var schema string
+	if err := conn.QueryRow(ctx, "SELECT current_schema()").Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
+	dsn, err := url.Parse(os.Getenv("TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := dsn.Query()
+	query.Set("search_path", schema)
+	dsn.RawQuery = query.Encode()
+	installPreviewHTTP(t)
+	getenv := func(name string) string {
+		if name == "DATABASE_URL" {
+			return dsn.String()
+		}
+		return "synthetic-key"
+	}
+	args := []string{"sync", "--from", "2026-11-02", "--to", "2026-11-02"}
+	var preview bytes.Buffer
+	if err := run(ctx, append(args, "--dry-run"), getenv, &preview); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := conn.QueryRow(ctx, "SELECT count(*) FROM daily_health").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("dry-run wrote rows: count=%d error=%v", count, err)
+	}
+	if err := run(ctx, args, getenv, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	wantCounts := make(map[string]int)
+	for _, r := range decodePreview(t, preview.String()) {
+		if r.Values == nil {
+			continue
+		}
+		wantCounts[r.Table]++
+		values, err := json.Marshal(r.Values)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Let PostgreSQL compare values using their actual column types, so date,
+		// timestamp and numeric formatting differences do not hide precision loss.
+		sql := "SELECT count(*) FROM " + r.Table + " AS actual WHERE actual IS NOT DISTINCT FROM jsonb_populate_record(NULL::" + r.Table + ", $1::jsonb)"
+		if err := conn.QueryRow(ctx, sql, values).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("preview differs from stored %s row: matches=%d error=%v", r.Table, count, err)
+		}
+	}
+	for table, want := range wantCounts {
+		if err := conn.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&count); err != nil || count != want {
+			t.Fatalf("stored %s count=%d want=%d error=%v", table, count, want, err)
+		}
+	}
+}
 
 func monitoringTestDay(day string) dayData {
 	var d dayData
@@ -253,114 +310,6 @@ func TestIntegrationWeightTransactionRollsBackOnFailure(t *testing.T) {
 	var count int
 	if err := conn.QueryRow(ctx, "SELECT count(*) FROM weight_measurements").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("weight transaction left a partial batch: count=%d err=%v", count, err)
-	}
-}
-
-func TestIntegrationMonitoringMigrationUpgradeAndFreshSchema(t *testing.T) {
-	ctx := context.Background()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Fatal("TEST_DATABASE_URL is required for integration tests")
-	}
-	conn, err := pgx.Connect(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	upgradeSchema := pgx.Identifier{fmt.Sprintf("garmin_monitoring_upgrade_%d", time.Now().UnixNano())}.Sanitize()
-	freshSchema := pgx.Identifier{fmt.Sprintf("garmin_monitoring_fresh_%d", time.Now().UnixNano())}.Sanitize()
-	if _, err := conn.Exec(ctx, "CREATE SCHEMA "+upgradeSchema); err != nil {
-		conn.Close(ctx)
-		t.Fatal(err)
-	}
-	if _, err := conn.Exec(ctx, "CREATE SCHEMA "+freshSchema); err != nil {
-		conn.Close(ctx)
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cleanup, err := pgx.Connect(context.Background(), dsn)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		defer cleanup.Close(context.Background())
-		for _, schema := range []string{freshSchema, upgradeSchema} {
-			if _, err := cleanup.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE"); err != nil {
-				t.Error(err)
-			}
-		}
-		conn.Close(context.Background())
-	})
-
-	if _, err := conn.Exec(ctx, "SET search_path TO "+upgradeSchema); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.Exec(ctx, schemaSQL); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.Exec(ctx, activitySchemaSQL); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.Exec(ctx, `INSERT INTO daily_health(day,steps) VALUES ('2026-10-27',1234);
-		INSERT INTO activities(activity_id,day,started_at,sport) VALUES (9002,'2026-10-27','2026-10-27 08:00:00+00','running')`); err != nil {
-		t.Fatal(err)
-	}
-
-	// Force a late additive statement to fail. Earlier column additions and the
-	// new weight table must roll back with the migration transaction.
-	if _, err := conn.Exec(ctx, "ALTER TABLE activities ADD COLUMN heart_rate_zone_5_s numeric"); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrateMonitoring(ctx, conn); err == nil {
-		t.Fatal("monitoring migration succeeded with an existing target column")
-	}
-	var exists bool
-	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
-		WHERE table_schema=current_schema() AND table_name='daily_health' AND column_name='respiration_avg')`).Scan(&exists); err != nil || exists {
-		t.Fatalf("failed migration left an earlier column behind: exists=%v err=%v", exists, err)
-	}
-	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.tables
-		WHERE table_schema=current_schema() AND table_name='weight_measurements')`).Scan(&exists); err != nil || exists {
-		t.Fatalf("failed migration left the weight table behind: exists=%v err=%v", exists, err)
-	}
-	if _, err := conn.Exec(ctx, "ALTER TABLE activities DROP COLUMN heart_rate_zone_5_s"); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrateMonitoring(ctx, conn); err != nil {
-		t.Fatal(err)
-	}
-	var steps int
-	var respirationNull, stressNull bool
-	if err := conn.QueryRow(ctx, `SELECT steps,respiration_avg IS NULL AND respiration_min IS NULL AND
-		respiration_max IS NULL AND respiration_latest IS NULL,
-		stress_rest_ms IS NULL AND stress_activity_ms IS NULL AND stress_uncategorized_ms IS NULL AND
-		stress_low_ms IS NULL AND stress_medium_ms IS NULL AND stress_high_ms IS NULL
-		FROM daily_health WHERE day='2026-10-27'`).Scan(&steps, &respirationNull, &stressNull); err != nil {
-		t.Fatal(err)
-	}
-	if steps != 1234 || !respirationNull || !stressNull {
-		t.Fatalf("upgrade changed original health row or initialized new values: steps=%d respiration_null=%v stress_null=%v", steps, respirationNull, stressNull)
-	}
-	var activityCount int
-	if err := conn.QueryRow(ctx, "SELECT count(*) FROM activities WHERE activity_id=9002").Scan(&activityCount); err != nil || activityCount != 1 {
-		t.Fatalf("upgrade changed original activity row count=%d err=%v", activityCount, err)
-	}
-	if err := migrateMonitoring(ctx, conn); err == nil {
-		t.Fatal("repeated monitoring migration succeeded")
-	}
-	if err := conn.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
-		WHERE table_schema=current_schema() AND table_name='weight_measurements'`).Scan(&activityCount); err != nil || activityCount != 1 {
-		t.Fatalf("repeated migration damaged the completed schema: weight table count=%d err=%v", activityCount, err)
-	}
-
-	if _, err := conn.Exec(ctx, "SET search_path TO "+freshSchema); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrate(ctx, conn); err != nil {
-		t.Fatal(err)
-	}
-	if err := conn.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables
-		WHERE table_schema=current_schema() AND table_name='weight_measurements'`).Scan(&activityCount); err != nil || activityCount != 1 {
-		t.Fatalf("fresh migration weight table count=%d err=%v", activityCount, err)
 	}
 }
 

@@ -156,7 +156,7 @@ func TestIntegrationHTTPFailureLeavesDayUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 	day, _ := time.Parse(time.DateOnly, "2026-10-25")
-	if err := syncRange(ctx, c, conn, day, day, io.Discard); err == nil {
+	if err := syncRange(ctx, c, conn, day, day, false, io.Discard); err == nil {
 		t.Fatal("invalid sleep response accepted")
 	}
 	var n int

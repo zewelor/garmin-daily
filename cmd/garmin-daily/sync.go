@@ -39,33 +39,30 @@ func fetchDay(ctx context.Context, c *garmin.Client, day string) (dayData, error
 	return d, d.validate(day)
 }
 
-func syncRange(ctx context.Context, c *garmin.Client, conn *pgx.Conn, from, to time.Time, out io.Writer) error {
-	return readDays(ctx, c, from, to, func(d dayData) error {
-		changed, err := saveDay(ctx, conn, d)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "day=%s changed_rows=%d\n", d.Health.Day, changed)
-		return nil
-	})
-}
-
-// Both sync modes use the same daily requests, validation and date iteration.
-func readDays(ctx context.Context, c *garmin.Client, from, to time.Time, consume func(dayData) error) error {
+func syncRange(ctx context.Context, c *garmin.Client, conn *pgx.Conn, from, to time.Time, dryRun bool, out io.Writer) error {
 	for day := from; !day.After(to); day = day.AddDate(0, 0, 1) {
 		date := day.Format(time.DateOnly)
 		d, err := fetchDay(ctx, c, date)
 		if err != nil {
 			return fmt.Errorf("%s: %w", date, err)
 		}
-		if err := consume(d); err != nil {
+		if dryRun {
+			err = printRows(out, dayRows(d))
+		} else {
+			var changed int64
+			changed, err = saveDay(ctx, conn, d)
+			if err == nil {
+				_, err = fmt.Fprintf(out, "day=%s changed_rows=%d\n", date, changed)
+			}
+		}
+		if err != nil {
 			return fmt.Errorf("%s: %w", date, err)
 		}
 	}
 	return nil
 }
 
-func syncActivitiesRange(ctx context.Context, c *garmin.Client, conn *pgx.Conn, from, to time.Time, out io.Writer) error {
+func syncActivitiesRange(ctx context.Context, c *garmin.Client, conn *pgx.Conn, from, to time.Time, dryRun bool, out io.Writer) error {
 	fromDate, toDate := from.Format(time.DateOnly), to.Format(time.DateOnly)
 	activities, err := c.Activities(ctx, fromDate, toDate)
 	if err != nil {
@@ -77,6 +74,20 @@ func syncActivitiesRange(ctx context.Context, c *garmin.Client, conn *pgx.Conn, 
 			continue
 		}
 		rootActivities = append(rootActivities, activity)
+	}
+	if err := validateActivities(rootActivities, fromDate, toDate); err != nil {
+		return err
+	}
+	if dryRun {
+		for _, a := range rootActivities {
+			if err := printRows(out, activityRows(a)); err != nil {
+				return err
+			}
+			if err := printExercisePrune(out, a.ID, len(a.Exercises)); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	changed, err := saveActivities(ctx, conn, rootActivities, fromDate, toDate)
 	if err != nil {

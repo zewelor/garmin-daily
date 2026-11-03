@@ -59,20 +59,15 @@ func saveWeights(ctx context.Context, conn *pgx.Conn, weights []garmin.WeightMea
 	var changed int64
 	err := pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
 		for _, w := range weights {
-			kg, err := weightKilograms(w)
+			r, err := weightRow(w)
 			if err != nil {
 				return err
 			}
-			day, _ := time.Parse(time.DateOnly, w.Day)
-			tag, err := tx.Exec(ctx, `INSERT INTO weight_measurements (measured_at,day,weight_kg)
-				VALUES ($1,$2,$3) ON CONFLICT (measured_at) DO UPDATE
-				SET day=EXCLUDED.day,weight_kg=EXCLUDED.weight_kg
-				WHERE ROW(weight_measurements.day,weight_measurements.weight_kg)
-				IS DISTINCT FROM ROW(EXCLUDED.day,EXCLUDED.weight_kg)`, w.Timestamp.Time, day, kg)
+			n, err := upsert(ctx, tx, r)
 			if err != nil {
 				return err
 			}
-			changed += tag.RowsAffected()
+			changed += n
 		}
 		return nil
 	})
@@ -82,11 +77,37 @@ func saveWeights(ctx context.Context, conn *pgx.Conn, weights []garmin.WeightMea
 	return changed, nil
 }
 
-func syncWeightsRange(ctx context.Context, c *garmin.Client, conn *pgx.Conn, from, to time.Time, out io.Writer) error {
+func weightRow(w garmin.WeightMeasurement) (row, error) {
+	kg, err := weightKilograms(w)
+	if err != nil {
+		return row{}, err
+	}
+	day, _ := time.Parse(time.DateOnly, w.Day)
+	return row{"weight_measurements", "measured_at", "measured_at day weight_kg", []any{
+		w.Timestamp.Time, pgtype.Date{Time: day, Valid: true}, kg,
+	}}, nil
+}
+
+func syncWeightsRange(ctx context.Context, c *garmin.Client, conn *pgx.Conn, from, to time.Time, dryRun bool, out io.Writer) error {
 	fromDate, toDate := from.Format(time.DateOnly), to.Format(time.DateOnly)
 	weights, err := c.WeightMeasurements(ctx, fromDate, toDate)
 	if err != nil {
 		return fmt.Errorf("weight fetch: %w", err)
+	}
+	if err := validateWeights(weights, fromDate, toDate); err != nil {
+		return err
+	}
+	if dryRun {
+		for _, w := range weights {
+			r, err := weightRow(w)
+			if err != nil {
+				return err
+			}
+			if err := printRows(out, []row{r}); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	changed, err := saveWeights(ctx, conn, weights, fromDate, toDate)
 	if err != nil {

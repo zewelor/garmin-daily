@@ -101,79 +101,6 @@ func TestIntegrationActivityUpsertAndExerciseSnapshot(t *testing.T) {
 	}
 }
 
-func TestIntegrationActivitySchemaMigrations(t *testing.T) {
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	conn, err := pgx.Connect(context.Background(), dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	schema := pgx.Identifier{fmt.Sprintf("garmin_activity_migrate_%d", time.Now().UnixNano())}.Sanitize()
-	freshSchema := ""
-	if _, err := conn.Exec(context.Background(), "CREATE SCHEMA "+schema); err != nil {
-		conn.Close(context.Background())
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cleanup, err := pgx.Connect(context.Background(), dsn)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		defer cleanup.Close(context.Background())
-		if freshSchema != "" {
-			if _, err := cleanup.Exec(context.Background(), "DROP SCHEMA "+freshSchema+" CASCADE"); err != nil {
-				t.Error(err)
-			}
-		}
-		if _, err := cleanup.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE"); err != nil {
-			t.Error(err)
-		}
-		conn.Close(context.Background())
-	})
-	if _, err := conn.Exec(context.Background(), "SET search_path TO "+schema); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.Exec(context.Background(), schemaSQL); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.Exec(context.Background(), "INSERT INTO daily_health(day) VALUES ('2026-10-26')"); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrateActivities(context.Background(), conn); err != nil {
-		t.Fatal(err)
-	}
-	var count int
-	if err := conn.QueryRow(context.Background(), `SELECT count(*) FROM information_schema.tables WHERE table_schema=$1 AND table_name IN ('activities','activity_exercises')`, strings.Trim(schema, `"`)).Scan(&count); err != nil || count != 2 {
-		t.Fatalf("activity tables=%d err=%v", count, err)
-	}
-	if err := conn.QueryRow(context.Background(), "SELECT count(*) FROM daily_health WHERE day='2026-10-26'").Scan(&count); err != nil || count != 1 {
-		t.Fatalf("upgrade changed daily row count=%d err=%v", count, err)
-	}
-	if err := migrateActivities(context.Background(), conn); err == nil {
-		t.Fatal("repeated activity migration succeeded")
-	}
-
-	freshSchema = pgx.Identifier{fmt.Sprintf("garmin_activity_fresh_%d", time.Now().UnixNano())}.Sanitize()
-	if _, err := conn.Exec(context.Background(), "CREATE SCHEMA "+freshSchema); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.Exec(context.Background(), "SET search_path TO "+freshSchema); err != nil {
-		t.Fatal(err)
-	}
-	if err := migrate(context.Background(), conn); err != nil {
-		t.Fatal(err)
-	}
-	if err := conn.QueryRow(context.Background(), `SELECT count(*) FROM information_schema.tables WHERE table_schema=$1 AND table_name IN ('daily_health','daily_sleep','daily_hrv','activities','activity_exercises')`, strings.Trim(freshSchema, `"`)).Scan(&count); err != nil || count != 5 {
-		t.Fatalf("fresh schema tables=%d err=%v", count, err)
-	}
-	if err := migrate(context.Background(), conn); err == nil {
-		t.Fatal("repeated fresh migration succeeded")
-	}
-	if _, err := conn.Exec(context.Background(), "SET search_path TO "+schema); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestIntegrationActivityTransactionRollsBackOnFailureAndCancellation(t *testing.T) {
 	ctx := context.Background()
 	conn := testDatabase(t)
@@ -267,7 +194,7 @@ func TestIntegrationActivityPageFailureWritesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	day := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
-	if err := syncActivitiesRange(ctx, c, conn, day, day, io.Discard); err == nil {
+	if err := syncActivitiesRange(ctx, c, conn, day, day, false, io.Discard); err == nil {
 		t.Fatal("activity page failure succeeded")
 	}
 	var count int
@@ -314,7 +241,7 @@ func TestIntegrationSyncPersistsParentAndNormalButNotChild(t *testing.T) {
 	}
 	day := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
 	var out strings.Builder
-	if err := syncActivitiesRange(ctx, c, conn, day, day, &out); err != nil {
+	if err := syncActivitiesRange(ctx, c, conn, day, day, false, &out); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != "activities=2 changed_rows=2\n" || activityRequests != 2 {

@@ -18,19 +18,19 @@ Run it manually or schedule it with cron, systemd or a Kubernetes CronJob.
 - **Repeatable imports** that apply corrections and skip unchanged rows.
 - **Atomic writes**: each daily date, activity range and weight range commit transactionally.
 - **Inspection before storage**: `sync --dry-run` downloads and validates monitoring data
-  without PostgreSQL; optional files retain the original responses.
+  and prints incoming PostgreSQL rows without connecting to the database.
 - **Small container**: a static Go binary, CA certificates and license in
   `scratch`, running as UID/GID `65532:65532`; database sync requires no writable filesystem.
 
 Each database or schema belongs to **one Garmin account**. The application does
 not manage users or run a web server. PostgreSQL stores typed summaries, without
 intraday sensor series, GPS data, raw API responses, account identifiers or device metadata.
-Optional dry-run artifacts retain original responses for private inspection.
 
 ## Quick start
 
-You need a Garmin **Personal API key** and a reachable PostgreSQL database.
+You need a Garmin **Personal API key** and a reachable **PostgreSQL 18 or newer** database.
 A Garmin Connect password is not a Personal API key.
+Database commands reject older PostgreSQL versions before changing the schema or importing data.
 
 ### Use the published image
 
@@ -47,7 +47,7 @@ container: `localhost` refers to the container itself. Keep `.env` out of Git.
 ```sh
 docker pull ghcr.io/zewelor/garmin-daily:latest
 
-# Run once against an empty database/schema. Creates all five tables.
+# Create or upgrade the schema; repeating this command is safe.
 docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
   --env-file .env ghcr.io/zewelor/garmin-daily:latest migrate
 
@@ -57,14 +57,8 @@ docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
   sync --last-days 7 --timezone Europe/London
 ```
 
-For a database that already has the three daily tables from an older GarminDaily
-release, run `migrate-activities` once before the next sync. See
+Use the same `migrate` command for existing installations. See
 [deployment](docs/deployment.md#upgrade-an-existing-database).
-
-```sh
-docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
-  --env-file .env ghcr.io/zewelor/garmin-daily:latest migrate-activities
-```
 
 Choose the IANA timezone that matches your Garmin account. See
 [deployment](docs/deployment.md) for scheduling, database roles and backups.
@@ -83,7 +77,7 @@ docker compose run --rm app sync --from 2026-10-25 --to 2026-10-31
 ```
 
 The database listens on `127.0.0.1:15432`. Its example credentials are for local
-use only. Run `migrate` once; running it again reports that the tables exist.
+use only. Run `migrate` before importing; repeating it applies no changes.
 
 ## Configuration
 
@@ -93,21 +87,19 @@ process manager to supply it.
 
 | Variable | Required by | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | Migrations, `sync` without `--dry-run`, `sync-activities` | PostgreSQL connection string and TLS settings. |
+| `DATABASE_URL` | `migrate`, either sync command without `--dry-run` | PostgreSQL connection string and TLS settings. |
 | `GARMIN_API_KEY` | `sync`, `sync-activities` | Garmin Connect Personal API key. |
 | `PGHOST`, `PGUSER`, `PGPASSWORD` | Optional | Standard pgx connection parameters; useful for keeping credentials out of the URL. |
 
 | Command | Behavior |
 | --- | --- |
-| `migrate` | Create all six tables with monitoring columns in one transaction. Run once on an empty database/schema. |
-| `migrate-activities` | Add the two activity tables transactionally to an existing three-table installation. Run once. |
-| `migrate-monitoring` | Add daily respiration/stress columns, activity zone times and the weight table to an existing five-table installation. Run once. |
+| `migrate` | Create or upgrade all six data tables transactionally; track applied versions in `schema_migrations`. Repeating is safe. |
 | `sync --from YYYY-MM-DD --to YYYY-MM-DD` | Import daily data, activities and weights for an inclusive range of Garmin calendar dates. |
 | `sync --last-days N --timezone IANA_ZONE` | Import daily data, activities and weights for today and the previous `N−1` dates in that timezone. |
 | `sync --last-days N --timezone IANA_ZONE --exclude-today` | Import daily data, activities and weights for yesterday and the previous `N−1` completed dates in that timezone. |
 | `sync-activities --from YYYY-MM-DD --to YYYY-MM-DD` | Import activities only for an inclusive range. |
 | `sync-activities --last-days N --timezone IANA_ZONE [--exclude-today]` | Import activities only for the selected rolling range; useful for backfills. |
-| `sync --dry-run` with either date-range mode | Download and validate monitoring data without database access. Add `--output NEW_DIRECTORY` for private inspection files. |
+| Either sync command with `--dry-run` | Fetch and validate the same data, then print incoming PostgreSQL rows as JSON Lines without database access. |
 
 There is no default date range. The two range modes cannot be combined.
 `--last-days` must be positive and requires a named IANA timezone or `UTC`;
@@ -136,35 +128,23 @@ only one writer against the same tables at a time.
 
 ## Inspect data before database import
 
-`sync --dry-run` reads health, sleep, HRV, every weight measurement, current heart-rate
-zone settings and all pages of recorded activities. Activity metrics include
-time in heart-rate zones, intensity minutes, calories, Training Effect,
-training load and VO₂max when Garmin supplies them. The health summary also
-includes daily respiration, SpO₂ and the distribution of stress durations.
+`sync --dry-run` uses the same requests, validation, activity filtering and
+column/value mapping as normal `sync`. It prints one JSON object per incoming
+row, with the table name and PostgreSQL column values. Weight is already in kg;
+missing values are `null`. It also prints exercise snapshot cleanup predicates.
 
 ```sh
 # Supply GARMIN_API_KEY through the environment; DATABASE_URL is not needed.
 garmin-daily sync --dry-run --from 2026-10-25 --to 2026-10-31
 
-# Optionally keep original responses and decoded data for inspection.
-garmin-daily sync --dry-run --from 2026-10-25 --to 2026-10-31 \
-  --output /tmp/garmin-inspection
+# Redirect stdout if you want to keep the preview locally.
+garmin-daily sync --dry-run --from 2026-10-25 --to 2026-10-31 > /tmp/garmin-preview.jsonl
 ```
 
-With `--output`, the directory must not exist. It is created with mode `0700`, with
-`0600` files: original GET responses, selected decoded data in `data.json`,
-and a final `manifest.json` containing request paths, statuses and SHA-256 hashes.
-API keys, bearer tokens and request headers are not saved. A failed dry run keeps
-its diagnostic files without a success manifest. These files contain personal
-health data; keep them outside the repository.
-
-The existing rolling-date flags also work with `--dry-run`. This mode never
-connects to PostgreSQL. Without `--output`, it prints counts and creates no files.
-Normal `sync` stores daily respiration and stress durations, activity zone times,
-and each weight measurement's date, UTC timestamp and mass in kg. Zone settings,
-body composition, daily SpO₂, VO₂max and other inspection-only fields are not stored.
-See [dry-run reference](docs/dry-run.md) for units, selected fields and verification
-limits, including discrepancies between Swagger and live weight responses.
+The rolling-date flags and `sync-activities --dry-run` work the same way.
+Dry-run does not read the database, so it cannot identify unchanged rows or
+verify permissions and SQL writes. Its output contains personal health data;
+keep saved previews outside the repository. See the [dry-run reference](docs/dry-run.md).
 
 ## Data model
 
@@ -214,8 +194,8 @@ recent tagged and 10 untagged versions while protecting `latest`. Older versions
 may be removed, so a commit tag is not a promise of indefinite retention.
 
 The image contains no API keys, database settings, account data or `.env` files.
-The production build context allows only application source, module files, both
-embedded schemas and the license; tests are excluded.
+The production build context allows only application source, module files, the three
+embedded SQL migrations and the license; tests are excluded.
 
 ## Development
 

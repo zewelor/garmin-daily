@@ -6,9 +6,8 @@ This reference describes the PostgreSQL rows written by `garmin-daily`. See the
 [activity SQL schema](../cmd/garmin-daily/activity_schema.sql) and
 [monitoring migration](../cmd/garmin-daily/monitoring_schema.sql) for the exact DDL.
 
-Additional monitoring fields available through `sync --dry-run` are documented
-in the [dry-run reference](dry-run.md). Fields beyond the mappings below remain
-inspection-only; zone settings, body composition, daily SpO₂ and VO₂max are not stored.
+The [dry-run reference](dry-run.md) describes how to preview these rows.
+Zone settings, body composition, daily SpO₂ and VO₂max are not modeled or stored.
 
 ## Tables and keys
 
@@ -128,7 +127,7 @@ Nested field paths include their full parent path.
 
 The live weight unit was checked against a manually entered account value;
 Swagger incorrectly labels it as kg. Local `date`, signed `weightDelta`, BMI
-and body composition remain inspection-only. Missing required measurement time
+and body composition are ignored. Missing required measurement time
 or mass, an out-of-range date, or duplicate timestamps abort the weight batch.
 
 Garmin's Personal API schema does not assign a unit to the HRV fields. The
@@ -175,7 +174,7 @@ values fail instead of being clipped or changed to zero.
   differ; `IS DISTINCT FROM` treats `NULL` consistently. Re-importing identical
   data does not write an unchanged row. There is no `updated_at` column.
 - Database imports omit child sessions with a positive `parentId`, preventing parent/child double counting.
-  Dry-run inspection retains both.
+  Dry-run applies the same filter.
 - Activity rows are keyed by `activity_id`. Corrections replace their stored
   summary, while activities absent from a later API response are retained.
 - Exercise summaries are snapshots indexed by their position in Garmin's array.
@@ -202,7 +201,7 @@ HTTP errors, network failures, and timeouts are not retried. Database connection
 and per-day transaction operations each have a 20-second timeout. Activity range
 transactions have a two-minute timeout. SIGINT and SIGTERM cancel I/O. Logs omit
 API keys, tokens, database connection strings, response bodies, activity names,
-IDs and body-weight values.
+IDs and body-weight values. Dry-run intentionally prints incoming row values.
 
 ## PostgreSQL design reference
 

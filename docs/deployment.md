@@ -6,15 +6,19 @@ secret manager or GitOps system.
 
 ## Prepare the database
 
+PostgreSQL **18 or newer** is required. `migrate`, `sync` and `sync-activities`
+reject older servers before modifying the database. Dry-run does not connect
+to PostgreSQL.
+
 1. Create a PostgreSQL database or schema for one Garmin account, with a role
    allowed to create its tables. Additional accounts need separate databases
    or schemas.
 2. Supply `DATABASE_URL` and `GARMIN_API_KEY` through your secret manager or
    process environment. Keep real values out of Git and command-line arguments.
 3. Pin `ghcr.io/zewelor/garmin-daily` to the digest in the publication job summary.
-4. Run `migrate` once against the empty database/schema. It creates all six
-   tables in one transaction. Running it again is an error; do not include it
-   in each scheduled sync.
+4. Run `migrate` against the selected database/schema. It creates or upgrades
+   all six data tables and records versions in `schema_migrations`, in one
+   transaction. Repeating it is safe; run it before syncing a new release.
 5. Import an explicit range with `sync --from YYYY-MM-DD --to YYYY-MM-DD`, check
    the daily dates, activity and weight summaries, then repeat it. With unchanged
    source data, all writes should report `changed_rows=0`.
@@ -26,28 +30,22 @@ Compose is for local testing only.
 
 ## Upgrade an existing database
 
-An installation with only the three daily tables must first run
-`migrate-activities` once. This creates `activities` and `activity_exercises`
-together and leaves daily data untouched. If those tables already exist, skip
-that completed migration.
+Run `migrate` with the schema-owner role before using this release. This is the
+same command used for fresh installations. It recognizes the three previously
+released schema versions (daily tables; daily plus activities; all monitoring
+fields) after checking their structure, records their versions and applies only
+pending migrations. Existing data is retained; new measurement columns begin as
+`NULL`. Re-import a date range to populate them.
 
-Then run `migrate-monitoring` once with a schema-owner role. It adds daily
-respiration and stress-duration columns, activity HR-zone seconds and
-`weight_measurements` in a single transaction. Existing rows retain their
-values and the new columns start as `NULL`; re-import a date range to populate
-them. The role needs permission to alter existing tables and create the new
-table. Grant the runtime writer access to `weight_measurements` and grant
-`SELECT` to any existing read-only role, using the same roles as the other tables.
+Migrations are transactional and serialized per schema. A repeated run applies
+no changes. An incomplete, modified or unknown schema, or an unsupported version
+history, fails explicitly; inspect the discrepancy before retrying. Extra
+unrelated tables do not affect migration recognition.
 
-Both upgrade commands deliberately fail on repeated execution or conflicting
-schema objects. Inspect an unexpected schema rather than rerunning migrations.
-Do not run fresh-install `migrate` against an existing schema.
-Run the monitoring upgrade before using either `sync` or `sync-activities`
-from this release; both write the new activity zone columns.
-
-If an activity table already exists from a prior attempt, inspect the schema
-before syncing. The migration is transactional, so a failed execution does not
-leave a newly created half of the activity schema.
+The migration role needs permission to alter existing tables and create tables.
+Grant the runtime writer access to `weight_measurements` and grant `SELECT` to
+any existing read-only role, using the same roles as the other data tables.
+Migration metadata does not require runtime writer access.
 
 ## Schedule synchronization
 

@@ -29,7 +29,7 @@ func TestClientEndpoints(t *testing.T) {
 			if r.URL.Query().Get("startDate") != day || r.URL.Query().Get("endDate") != day {
 				t.Error("wrong summary dates")
 			}
-			fmt.Fprint(w, `{"data":[{"calendarDate":"2026-10-25","movement":{"steps":{"distanceInMeters":1234.567890123456789}}}]}`)
+			fmt.Fprint(w, `{"data":[{"calendarDate":"2026-10-25","movement":{"steps":{"value":0,"distanceInMeters":1234.567890123456789}},"calories":{"burnedTotal":0,"burnedActive":null,"burnedResting":2100},"heartRate":{"restingValue":0,"minValue":null,"maxValue":180},"intensityMinutes":{"moderate":0,"vigorous":15},"stress":{"avgLevel":0,"maxLevel":70,"totalDurationInMillis":{"unexpected":true},"restDurationInMillis":0,"activityDurationInMillis":1000,"uncategorizedDurationInMillis":null,"lowStressDurationInMillis":2000,"mediumStressDurationInMillis":3000,"highStressDurationInMillis":4000,"qualifier":[]},"respiration":{"avgValue":0,"minValue":null,"maxValue":20,"latestValue":0},"pulseOx":{"avgValue":[]},"bodyBattery":{"minValue":0,"maxValue":100,"chargedValue":0,"drainedValue":null,"latestValue":0}}]}`)
 		case "/sleep-service/sleep/dailySleep":
 			if r.URL.Query().Get("date") != day {
 				t.Error("wrong sleep date")
@@ -52,8 +52,23 @@ func TestClientEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.Movement.Steps.Distance.String() != "1234.567890123456789" {
-		t.Fatal("decimal precision lost")
+	if summary.Movement.Steps.Value == nil || *summary.Movement.Steps.Value != 0 || summary.Movement.Steps.Distance.String() != "1234.567890123456789" {
+		t.Fatal("summary movement zero or decimal precision lost")
+	}
+	if summary.Calories.Total == nil || *summary.Calories.Total != 0 || summary.Calories.Active != nil || summary.Calories.Resting == nil || *summary.Calories.Resting != 2100 {
+		t.Fatal("summary calories zero or null changed")
+	}
+	if summary.HeartRate.Resting == nil || *summary.HeartRate.Resting != 0 || summary.HeartRate.Min != nil || summary.HeartRate.Max == nil || *summary.HeartRate.Max != 180 {
+		t.Fatal("summary heart rate zero or null changed")
+	}
+	if summary.Stress.RestMillis == nil || *summary.Stress.RestMillis != 0 || summary.Stress.UncategorizedMillis != nil || summary.Stress.HighMillis == nil || *summary.Stress.HighMillis != 4000 {
+		t.Fatal("summary stress duration zero or null changed")
+	}
+	if summary.Respiration.Average == nil || *summary.Respiration.Average != 0 || summary.Respiration.Min != nil || summary.Respiration.Latest == nil || *summary.Respiration.Latest != 0 {
+		t.Fatal("summary respiration zero or null changed")
+	}
+	if summary.Battery.Min == nil || *summary.Battery.Min != 0 || summary.Battery.Drained != nil || summary.Battery.Latest == nil || *summary.Battery.Latest != 0 {
+		t.Fatal("summary body battery zero or null changed")
 	}
 	sleep, err := client.DailySleep(ctx, day)
 	if err != nil {

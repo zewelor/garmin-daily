@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMonitoringEndpoints(t *testing.T) {
@@ -15,12 +16,7 @@ func TestMonitoringEndpoints(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/weight-service/weight/all/2026-10-28/2026-11-03":
-			fmt.Fprint(w, `[{"calendarDate":"2026-11-02","date":1793613600000,"timestampGMT":1793613600000,"weight":82345.67890123456789,"weightDelta":-500.125,"bodyFat":null},{"calendarDate":"2026-11-02","date":1793617200000,"timestampGMT":1793617200000,"weight":82400,"bmi":24.125,"bodyFat":20.5,"bodyWater":55.25,"muscleMass":40000.125,"boneMass":3000,"metabolicAge":32.5}]`)
-		case "/biometric-service/heartRateZones/v2":
-			if r.URL.Query().Get("generateDefaults") != "false" {
-				t.Error("read-only fetch must not generate zone defaults")
-			}
-			fmt.Fprint(w, `[{"sport":"RUNNING","trainingMethod":"HR_MAX","zone1Floor":90,"zone2Floor":110,"zone3Floor":130,"zone4Floor":150,"zone5Floor":170,"maxHeartRateUsed":190}]`)
+			fmt.Fprint(w, `[{"calendarDate":"2026-11-02","date":{"unexpected":"ignored"},"timestampGMT":1793613600000,"weight":82345.67890123456789,"weightDelta":"bad","bodyFat":null},{"calendarDate":"2026-11-02","timestampGMT":1793617200000,"weight":0,"bmi":[],"bodyFat":{"unexpected":"ignored"},"bodyWater":false,"muscleMass":"bad","boneMass":-1,"metabolicAge":null}]`)
 		case "/activitylist-service/activities/search/activities":
 			q := r.URL.Query()
 			if q.Get("startDate") != "2026-10-28" || q.Get("endDate") != "2026-11-03" || q.Get("excludeChildren") != "false" || q.Get("limit") != "100" || q.Get("sortOrder") != "asc" {
@@ -39,9 +35,9 @@ func TestMonitoringEndpoints(t *testing.T) {
 				t.Errorf("unexpected pagination offset %q", q.Get("start"))
 			}
 			for id := first; id <= last; id++ {
-				row := map[string]any{"activityId": id, "startTimeLocal": "2026-11-02 12:00:00", "startTimeGMT": "2026-11-02 12:00:00", "activityType": map[string]string{"typeKey": "running"}, "duration": json.Number("1800.123456789"), "calories": 250, "hrTimeInZone_2": json.Number("1200.125"), "aerobicTrainingEffect": 2.5, "activityTrainingLoad": 45, "vO2MaxValue": nil}
+				row := map[string]any{"activityId": id, "startTimeLocal": "2026-11-02 12:00:00", "startTimeGMT": "2026-11-02 12:00:00", "activityType": map[string]any{"typeKey": "running", "typeId": map[string]any{"unexpected": "ignored"}}, "duration": json.Number("1800.123456789"), "calories": 250, "hrTimeInZone_2": json.Number("1200.125"), "aerobicTrainingEffect": 2.5, "activityTrainingLoad": 45, "vO2MaxValue": map[string]any{"unexpected": "ignored"}, "isParent": map[string]any{"unexpected": "ignored"}, "movingDuration": "bad", "trainingStressScore": -1}
 				if id == 2 {
-					row["vO2MaxValue"], row["trainingStressScore"], row["anaerobicTrainingEffect"] = json.Number("42.125"), json.Number("60.75"), json.Number("0.5")
+					row["anaerobicTrainingEffect"] = json.Number("0.5")
 					row["parentId"] = 1
 				}
 				rows = append(rows, row)
@@ -59,25 +55,21 @@ func TestMonitoringEndpoints(t *testing.T) {
 	if err != nil || len(w) != 2 {
 		t.Fatalf("weights count=%d err=%v", len(w), err)
 	}
-	if w[0].Weight.String() != "82345.67890123456789" || w[0].Delta.String() != "-500.125" || w[0].BodyFat != nil || w[0].Timestamp.UnixMilli() != 1793613600000 {
-		t.Fatal("weight precision, signed delta, timestamp or missing composition changed")
+	if w[0].Weight.String() != "82345.67890123456789" || w[0].Timestamp.UnixMilli() != 1793613600000 || w[0].Timestamp.Location() != time.UTC {
+		t.Fatal("weight precision or timestamp changed")
 	}
-	if w[1].BMI.String() != "24.125" || w[1].BodyFat.String() != "20.5" || w[1].BodyWater.String() != "55.25" || w[1].MuscleMass.String() != "40000.125" || w[1].BoneMass.String() != "3000" || w[1].MetabolicAge.String() != "32.5" {
-		t.Fatal("populated body composition values changed")
-	}
-	z, err := c.HeartRateZones(ctx)
-	if err != nil || len(z) != 1 || z[0].Sport != "RUNNING" || *z[0].Zone2Floor != 110 {
-		t.Fatalf("zones=%v err=%v", z, err)
+	if w[1].Weight == nil || w[1].Weight.String() != "0" || w[1].Timestamp.UnixMilli() != 1793617200000 {
+		t.Fatal("second weight measurement changed")
 	}
 	a, err := c.Activities(ctx, "2026-10-28", "2026-11-03")
 	if err != nil || len(a) != 101 || activityPages != 3 {
 		t.Fatalf("activities=%d pages=%d err=%v", len(a), activityPages, err)
 	}
-	if a[100].ID != 101 || a[0].Duration.String() != "1800.123456789" || a[0].Zone2Seconds.String() != "1200.125" || a[0].VO2Max != nil {
+	if a[100].ID != 101 || a[0].Duration.String() != "1800.123456789" || a[0].Zone2Seconds.String() != "1200.125" {
 		t.Fatal("activity measurements or missing values changed")
 	}
-	if a[1].VO2Max.String() != "42.125" || a[1].TrainingStress.String() != "60.75" || a[1].AnaerobicEffect.String() != "0.5" || a[1].ParentID == nil || *a[1].ParentID != 1 {
-		t.Fatal("populated training metrics or child-session link changed")
+	if a[1].AnaerobicEffect.String() != "0.5" || a[1].ParentID == nil || *a[1].ParentID != 1 {
+		t.Fatal("training effect or child-session link changed")
 	}
 }
 
@@ -125,7 +117,6 @@ func TestMonitoringRejectsBadResponses(t *testing.T) {
 			_, e := c.WeightMeasurements(context.Background(), "2026-11-02", "2026-11-02")
 			return e
 		}},
-		{"unordered zones", `[{"sport":"RUNNING","zone1Floor":150,"zone2Floor":100}]`, func(c *Client) error { _, e := c.HeartRateZones(context.Background()); return e }},
 		{"missing activity id", `[{"startTimeLocal":"2026-11-02 12:00:00"}]`, func(c *Client) error {
 			_, e := c.Activities(context.Background(), "2026-11-02", "2026-11-02")
 			return e
@@ -184,8 +175,5 @@ func TestMonitoringEmptyAndInvalidRange(t *testing.T) {
 	}
 	if a, err := c.Activities(ctx, "2026-11-02", "2026-11-02"); err != nil || len(a) != 0 {
 		t.Fatalf("empty activities: %v", err)
-	}
-	if z, err := c.HeartRateZones(ctx); err != nil || len(z) != 0 {
-		t.Fatalf("empty zones: %v", err)
 	}
 }
