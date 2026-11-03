@@ -40,17 +40,27 @@ func fetchDay(ctx context.Context, c *garmin.Client, day string) (dayData, error
 }
 
 func syncRange(ctx context.Context, c *garmin.Client, conn *pgx.Conn, from, to time.Time, out io.Writer) error {
+	return readDays(ctx, c, from, to, func(d dayData) error {
+		changed, err := saveDay(ctx, conn, d)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "day=%s changed_rows=%d\n", d.Health.Day, changed)
+		return nil
+	})
+}
+
+// Both sync modes use the same daily requests, validation and date iteration.
+func readDays(ctx context.Context, c *garmin.Client, from, to time.Time, consume func(dayData) error) error {
 	for day := from; !day.After(to); day = day.AddDate(0, 0, 1) {
 		date := day.Format(time.DateOnly)
 		d, err := fetchDay(ctx, c, date)
 		if err != nil {
 			return fmt.Errorf("%s: %w", date, err)
 		}
-		changed, err := saveDay(ctx, conn, d)
-		if err != nil {
+		if err := consume(d); err != nil {
 			return fmt.Errorf("%s: %w", date, err)
 		}
-		fmt.Fprintf(out, "day=%s changed_rows=%d\n", date, changed)
 	}
 	return nil
 }
@@ -61,10 +71,17 @@ func syncActivitiesRange(ctx context.Context, c *garmin.Client, conn *pgx.Conn, 
 	if err != nil {
 		return fmt.Errorf("activity fetch: %w", err)
 	}
-	changed, err := saveActivities(ctx, conn, activities, fromDate, toDate)
+	rootActivities := make([]garmin.Activity, 0, len(activities))
+	for _, activity := range activities {
+		if activity.ParentID != nil && *activity.ParentID > 0 {
+			continue
+		}
+		rootActivities = append(rootActivities, activity)
+	}
+	changed, err := saveActivities(ctx, conn, rootActivities, fromDate, toDate)
 	if err != nil {
 		return fmt.Errorf("activity save: %w", err)
 	}
-	_, err = fmt.Fprintf(out, "activities=%d changed_rows=%d\n", len(activities), changed)
+	_, err = fmt.Fprintf(out, "activities=%d changed_rows=%d\n", len(rootActivities), changed)
 	return err
 }

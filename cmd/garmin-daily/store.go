@@ -137,29 +137,54 @@ func saveDay(ctx context.Context, conn *pgx.Conn, d dayData) (int64, error) {
 	return changed, nil
 }
 
+func activityDates(a garmin.Activity) (time.Time, time.Time, error) {
+	local, err := time.Parse(time.DateTime, a.StartLocal)
+	if err != nil || local.Format(time.DateTime) != a.StartLocal {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid activity local start time")
+	}
+	startedAt, err := time.ParseInLocation(time.DateTime, a.StartGMT, time.UTC)
+	if err != nil || startedAt.Format(time.DateTime) != a.StartGMT {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid activity GMT start time")
+	}
+	day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.UTC)
+	return day, startedAt, nil
+}
+
+func nullableActivityName(name string) any {
+	if name == "" {
+		return nil
+	}
+	return name
+}
+
 func validateActivity(a garmin.Activity, from, to string) error {
-	if a.ID <= 0 || !validDay(a.Day) || a.Day < from || a.Day > to || a.StartedAt.IsZero() || strings.TrimSpace(a.Sport) == "" {
+	day, _, err := activityDates(a)
+	dayString := day.Format(time.DateOnly)
+	if a.ID <= 0 || err != nil || !validDay(dayString) || dayString < from || dayString > to || strings.TrimSpace(a.Type.Key) == "" {
 		return fmt.Errorf("invalid activity identity or timestamp")
 	}
-	if a.Sets != nil && *a.Sets < 0 || a.Reps != nil && *a.Reps < 0 {
+	if a.TotalSets != nil && *a.TotalSets < 0 || a.TotalReps != nil && *a.TotalReps < 0 {
 		return fmt.Errorf("negative activity count")
 	}
 	if a.BodyBatteryChange != nil && (*a.BodyBatteryChange < -100 || *a.BodyBatteryChange > 100) {
 		return fmt.Errorf("body battery change outside supported range")
 	}
 	for _, value := range []*json.Number{
-		a.DurationS, a.DistanceM, a.AverageSpeedMPS, a.Calories, a.HeartRateAvg, a.HeartRateMax,
-		a.TrainingEffectAerobic, a.TrainingEffectAnaerobic, a.TrainingLoad, a.DepthMaxCM,
+		a.Duration, a.Distance, a.AverageSpeed, a.Calories, a.HeartRateAverage, a.HeartRateMax,
+		a.AerobicEffect, a.AnaerobicEffect, a.TrainingLoad, a.MaxDepth,
 	} {
 		if _, err := (databaseNumber{value}).NumericValue(); err != nil {
 			return err
 		}
 	}
 	for _, exercise := range a.Exercises {
+		if exercise == nil {
+			return fmt.Errorf("invalid summarized exercise set")
+		}
 		if exercise.Sets != nil && *exercise.Sets < 0 || exercise.Reps != nil && *exercise.Reps < 0 {
 			return fmt.Errorf("negative exercise count")
 		}
-		for _, value := range []*json.Number{exercise.DurationMS, exercise.MaxWeightG, exercise.VolumeG} {
+		for _, value := range []*json.Number{exercise.Duration, exercise.MaxWeight, exercise.Volume} {
 			if _, err := (databaseNumber{value}).NumericValue(); err != nil {
 				return err
 			}
@@ -187,7 +212,7 @@ func saveActivities(ctx context.Context, conn *pgx.Conn, activities []garmin.Act
 	var changed int64
 	err := pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
 		for _, activity := range activities {
-			day, _ := time.Parse(time.DateOnly, activity.Day)
+			day, startedAt, _ := activityDates(activity)
 			tag, err := tx.Exec(ctx, `INSERT INTO activities (
 				activity_id,day,started_at,name,sport,duration_s,distance_m,average_speed_mps,calories,
 				heart_rate_avg,heart_rate_max,training_effect_aerobic,training_effect_anaerobic,
@@ -210,11 +235,11 @@ func saveActivities(ctx context.Context, conn *pgx.Conn, activities []garmin.Act
 				EXCLUDED.heart_rate_avg,EXCLUDED.heart_rate_max,EXCLUDED.training_effect_aerobic,
 				EXCLUDED.training_effect_anaerobic,EXCLUDED.training_load,EXCLUDED.sets,EXCLUDED.reps,
 				EXCLUDED.depth_max_cm,EXCLUDED.body_battery_change)`,
-				activity.ID, day, activity.StartedAt, activity.Name, activity.Sport,
-				databaseNumber{activity.DurationS}, databaseNumber{activity.DistanceM}, databaseNumber{activity.AverageSpeedMPS},
-				databaseNumber{activity.Calories}, databaseNumber{activity.HeartRateAvg}, databaseNumber{activity.HeartRateMax},
-				databaseNumber{activity.TrainingEffectAerobic}, databaseNumber{activity.TrainingEffectAnaerobic},
-				databaseNumber{activity.TrainingLoad}, activity.Sets, activity.Reps, databaseNumber{activity.DepthMaxCM},
+				activity.ID, day, startedAt, nullableActivityName(activity.Name), activity.Type.Key,
+				databaseNumber{activity.Duration}, databaseNumber{activity.Distance}, databaseNumber{activity.AverageSpeed},
+				databaseNumber{activity.Calories}, databaseNumber{activity.HeartRateAverage}, databaseNumber{activity.HeartRateMax},
+				databaseNumber{activity.AerobicEffect}, databaseNumber{activity.AnaerobicEffect},
+				databaseNumber{activity.TrainingLoad}, activity.TotalSets, activity.TotalReps, databaseNumber{activity.MaxDepth},
 				activity.BodyBatteryChange)
 			if err != nil {
 				return err
@@ -232,7 +257,7 @@ func saveActivities(ctx context.Context, conn *pgx.Conn, activities []garmin.Act
 					activity_exercises.volume_g) IS DISTINCT FROM ROW(EXCLUDED.category,EXCLUDED.subcategory,
 					EXCLUDED.sets,EXCLUDED.reps,EXCLUDED.duration_ms,EXCLUDED.max_weight_g,EXCLUDED.volume_g)`,
 					activity.ID, i, exercise.Category, exercise.Subcategory, exercise.Sets, exercise.Reps,
-					databaseNumber{exercise.DurationMS}, databaseNumber{exercise.MaxWeightG}, databaseNumber{exercise.VolumeG})
+					databaseNumber{exercise.Duration}, databaseNumber{exercise.MaxWeight}, databaseNumber{exercise.Volume})
 				if err != nil {
 					return err
 				}

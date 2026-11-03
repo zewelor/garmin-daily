@@ -5,6 +5,10 @@ This reference describes the PostgreSQL rows written by `garmin-daily`. See the
 [daily SQL schema](../cmd/garmin-daily/schema.sql) and
 [activity SQL schema](../cmd/garmin-daily/activity_schema.sql) for the exact DDL.
 
+Additional monitoring fields available through `sync --dry-run` are documented
+in the [dry-run reference](dry-run.md). Additional monitoring fields beyond the daily/activity
+columns below are not yet part of PostgreSQL storage.
+
 ## Tables and keys
 
 The schema stores one Garmin account's data in the selected database or
@@ -144,6 +148,8 @@ values fail instead of being clipped or changed to zero.
 - Rows use `ON CONFLICT (day)`. An existing row is updated only when its values
   differ; `IS DISTINCT FROM` treats `NULL` consistently. Re-importing identical
   data does not write an unchanged row. There is no `updated_at` column.
+- Database imports omit child sessions with a positive `parentId`, preventing parent/child double counting.
+  Dry-run inspection retains both.
 - Activity rows are keyed by `activity_id`. Corrections replace their stored
   summary, while activities absent from a later API response are retained.
 - Exercise summaries are snapshots indexed by their position in Garmin's array.
@@ -171,8 +177,8 @@ and IDs.
 The `garmin/` package accepts an API base URL and a caller-supplied `http.Client`.
 Authenticate with `Authenticate(ctx, key)` before calling `DailySummary`,
 `DailySleep`, `DailyHRV` or `Activities`. Sleep and HRV return `nil, nil` for
-HTTP 204. `Activities` requests 99 summaries per page, ordered by local start
-time descending, and returns only after a short or empty page ends pagination.
+HTTP 204. `Activities` requests 100 summaries per page, ordered ascending, includes child sessions,
+and continues until an empty page ends pagination, including when the server limits pages below 100.
 Use the client sequentially; the caller owns timeouts and redirect policy.
 
 The CLI holds one token in memory for the run. It does not persist or refresh

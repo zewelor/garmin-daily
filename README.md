@@ -13,15 +13,18 @@ GarminDaily is a small, run-once CLI built around the official **Garmin Connect
 Personal API**. It authenticates, imports an explicit date range and exits.
 Run it manually or schedule it with cron, systemd or a Kubernetes CronJob.
 
-- **Five compact tables** for daily health, sleep and HRV, activities, and workout summaries.
+- **Five compact tables** for daily health, sleep and HRV, top-level activities, and workout summaries.
 - **Repeatable imports** that apply corrections and skip unchanged rows.
 - **Atomic writes**: each daily date and the full fetched activity range commit transactionally.
+- **Inspection before storage**: `sync --dry-run` downloads and validates monitoring data
+  without PostgreSQL; optional files retain the original responses.
 - **Small container**: a static Go binary, CA certificates and license in
-  `scratch`, running as UID/GID `65532:65532` with no writable filesystem required.
+  `scratch`, running as UID/GID `65532:65532`; database sync requires no writable filesystem.
 
 Each database or schema belongs to **one Garmin account**. The application does
-not manage users, run a web server or store intraday samples, GPS data, raw API
-responses, account identifiers or device metadata.
+not manage users or run a web server. PostgreSQL stores typed summaries, without
+intraday samples, GPS data, raw API responses, account identifiers or device metadata.
+Optional dry-run artifacts retain original responses for private inspection.
 
 ## Quick start
 
@@ -89,7 +92,7 @@ process manager to supply it.
 
 | Variable | Required by | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | `migrate`, `migrate-activities`, `sync`, `sync-activities` | PostgreSQL connection string and TLS settings. |
+| `DATABASE_URL` | `migrate`, `migrate-activities`, `sync` without `--dry-run`, `sync-activities` | PostgreSQL connection string and TLS settings. |
 | `GARMIN_API_KEY` | `sync`, `sync-activities` | Garmin Connect Personal API key. |
 | `PGHOST`, `PGUSER`, `PGPASSWORD` | Optional | Standard pgx connection parameters; useful for keeping credentials out of the URL. |
 
@@ -102,6 +105,7 @@ process manager to supply it.
 | `sync --last-days N --timezone IANA_ZONE --exclude-today` | Import daily data and activities for yesterday and the previous `N−1` completed dates in that timezone. |
 | `sync-activities --from YYYY-MM-DD --to YYYY-MM-DD` | Import activities only for an inclusive range. |
 | `sync-activities --last-days N --timezone IANA_ZONE [--exclude-today]` | Import activities only for the selected rolling range; useful for backfills. |
+| `sync --dry-run` with either date-range mode | Download and validate monitoring data without database access. Add `--output NEW_DIRECTORY` for private inspection files. |
 
 There is no default date range. The two range modes cannot be combined.
 `--last-days` must be positive and requires a named IANA timezone or `UTC`;
@@ -124,6 +128,36 @@ the requested activity range and its exercise snapshots. If activity fetching
 or writing fails, `sync` exits nonzero; already committed daily dates remain,
 and the activity range has no partial writes. Repeat the range to resume. Run
 only one writer against the same tables at a time.
+
+## Inspect data before database import
+
+`sync --dry-run` reads health, sleep, HRV, every weight measurement, current heart-rate
+zone settings and all pages of recorded activities. Activity metrics include
+time in heart-rate zones, intensity minutes, calories, Training Effect,
+training load and VO₂max when Garmin supplies them. The health summary also
+includes daily respiration, SpO₂ and the distribution of stress durations.
+
+```sh
+# Supply GARMIN_API_KEY through the environment; DATABASE_URL is not needed.
+garmin-daily sync --dry-run --from 2026-10-25 --to 2026-10-31
+
+# Optionally keep original responses and decoded data for inspection.
+garmin-daily sync --dry-run --from 2026-10-25 --to 2026-10-31 \
+  --output /tmp/garmin-inspection
+```
+
+With `--output`, the directory must not exist. It is created with mode `0700`, with
+`0600` files: original GET responses, selected decoded data in `data.json`,
+and a final `manifest.json` containing request paths, statuses and SHA-256 hashes.
+API keys, bearer tokens and request headers are not saved. A failed dry run keeps
+its diagnostic files without a success manifest. These files contain personal
+health data; keep them outside the repository.
+
+The existing rolling-date flags also work with `--dry-run`. This mode never
+connects to PostgreSQL. Without `--output`, it prints counts and creates no files.
+**The additional metrics are not yet written by normal `sync`.**
+See [dry-run reference](docs/dry-run.md) for units, selected fields and verification
+limits, including discrepancies between Swagger and live weight responses.
 
 ## Data model
 

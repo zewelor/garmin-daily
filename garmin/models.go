@@ -32,9 +32,28 @@ type Summary struct {
 		Vigorous *int16 `json:"vigorous"`
 	} `json:"intensityMinutes"`
 	Stress struct {
-		Average *int16 `json:"avgLevel"`
-		Max     *int16 `json:"maxLevel"`
+		Average             *int16  `json:"avgLevel"`
+		Max                 *int16  `json:"maxLevel"`
+		TotalMillis         *int64  `json:"totalDurationInMillis"`
+		RestMillis          *int64  `json:"restDurationInMillis"`
+		ActivityMillis      *int64  `json:"activityDurationInMillis"`
+		UncategorizedMillis *int64  `json:"uncategorizedDurationInMillis"`
+		LowMillis           *int64  `json:"lowStressDurationInMillis"`
+		MediumMillis        *int64  `json:"mediumStressDurationInMillis"`
+		HighMillis          *int64  `json:"highStressDurationInMillis"`
+		Qualifier           *string `json:"qualifier"`
 	} `json:"stress"`
+	Respiration struct {
+		Average *int16 `json:"avgValue"`
+		Min     *int16 `json:"minValue"`
+		Max     *int16 `json:"maxValue"`
+		Latest  *int16 `json:"latestValue"`
+	} `json:"respiration"`
+	PulseOx struct {
+		Average *int16 `json:"avgValue"`
+		Min     *int16 `json:"minValue"`
+		Latest  *int16 `json:"latestValue"`
+	} `json:"pulseOx"`
 	Battery struct {
 		Min     *int16 `json:"minValue"`
 		Max     *int16 `json:"maxValue"`
@@ -47,6 +66,10 @@ type Summary struct {
 // EpochMillis decodes Garmin's UTC epoch milliseconds into a Go time.
 // The live API uses numbers despite the Swagger string type.
 type EpochMillis struct{ time.Time }
+
+func (e EpochMillis) MarshalJSON() ([]byte, error) {
+	return []byte(strconv.FormatInt(e.UnixMilli(), 10)), nil
+}
 
 func (e *EpochMillis) UnmarshalJSON(b []byte) error {
 	n, err := strconv.ParseInt(string(b), 10, 64)

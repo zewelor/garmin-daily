@@ -3,20 +3,20 @@ package main
 import (
 	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/zewelor/garmin-daily/garmin"
 )
 
 func TestValidateActivityValues(t *testing.T) {
-	valid := garmin.Activity{ID: 1, Day: "2026-10-26", StartedAt: time.Date(2026, 10, 25, 23, 15, 0, 0, time.UTC), Sport: "cycling"}
+	valid := garmin.Activity{ID: 1, StartLocal: "2026-10-26 00:15:00", StartGMT: "2026-10-25 23:15:00"}
+	valid.Type.Key = "cycling"
 	if err := validateActivity(valid, "2026-10-26", "2026-10-26"); err != nil {
 		t.Fatal(err)
 	}
 
 	zero := json.Number("0")
 	negative := json.Number("-0.01")
-	valid.DistanceM = &zero
+	valid.Distance = &zero
 	if err := validateActivity(valid, "2026-10-26", "2026-10-26"); err != nil {
 		t.Fatalf("zero or absent measurements rejected: %v", err)
 	}

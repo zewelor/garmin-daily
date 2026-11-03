@@ -26,20 +26,21 @@ func activityNumber(value string) *json.Number {
 func integrationActivity() garmin.Activity {
 	change := int16(-12)
 	sets, reps := int32(2), int32(10)
-	return garmin.Activity{
-		ID: 9001, Day: "2026-10-26", StartedAt: time.Date(2026, 10, 25, 23, 15, 0, 0, time.UTC),
-		Sport: "strength_training", DurationS: activityNumber("3661.123456789012345"),
-		DistanceM: activityNumber("0"), AverageSpeedMPS: activityNumber("1e-10"),
-		Calories: activityNumber("123.45"), HeartRateAvg: activityNumber("0"),
-		TrainingEffectAerobic: activityNumber("1.5"), TrainingLoad: activityNumber("1.234567890123456789"),
-		Sets: &sets, Reps: &reps, BodyBatteryChange: &change,
-		Exercises: []garmin.ActivityExercise{
+	activity := garmin.Activity{
+		ID: 9001, StartLocal: "2026-10-26 00:15:00", StartGMT: "2026-10-25 23:15:00",
+		Duration: activityNumber("3661.123456789012345"), Distance: activityNumber("0"), AverageSpeed: activityNumber("1e-10"),
+		Calories: activityNumber("123.45"), HeartRateAverage: activityNumber("0"),
+		AerobicEffect: activityNumber("1.5"), TrainingLoad: activityNumber("1.234567890123456789"),
+		TotalSets: &sets, TotalReps: &reps, BodyBatteryChange: &change,
+		Exercises: []*garmin.ActivityExercise{
 			{Category: stringPointer("strength_training"), Subcategory: stringPointer("bench_press"), Sets: &sets, Reps: &reps,
-				DurationMS: activityNumber("1234.5"), MaxWeightG: activityNumber("12000"), VolumeG: activityNumber("120000.123456789")},
+				Duration: activityNumber("1234.5"), MaxWeight: activityNumber("12000"), Volume: activityNumber("120000.123456789")},
 			{Category: stringPointer("strength_training"), Subcategory: stringPointer("row"), Sets: &sets, Reps: &reps,
-				DurationMS: activityNumber("0"), MaxWeightG: activityNumber("0"), VolumeG: activityNumber("0")},
+				Duration: activityNumber("0"), MaxWeight: activityNumber("0"), Volume: activityNumber("0")},
 		},
 	}
+	activity.Type.Key = "strength_training"
+	return activity
 }
 
 func stringPointer(value string) *string { return &value }
@@ -48,20 +49,21 @@ func TestIntegrationActivityUpsertAndExerciseSnapshot(t *testing.T) {
 	ctx := context.Background()
 	conn := testDatabase(t)
 	a := integrationActivity()
-	if changed, err := saveActivities(ctx, conn, []garmin.Activity{a}, a.Day, a.Day); err != nil || changed != 3 {
+	const day = "2026-10-26"
+	if changed, err := saveActivities(ctx, conn, []garmin.Activity{a}, day, day); err != nil || changed != 3 {
 		t.Fatalf("initial activity save changed=%d err=%v", changed, err)
 	}
-	var day, sport, duration, distance, speed, battery, volume string
+	var storedDay, sport, duration, distance, speed, battery, volume string
 	var started time.Time
 	var missing bool
 	err := conn.QueryRow(ctx, `SELECT day::text,sport,duration_s::text,distance_m::text,average_speed_mps::text,
 		body_battery_change::text,started_at,name IS NULL FROM activities WHERE activity_id=9001`).Scan(
-		&day, &sport, &duration, &distance, &speed, &battery, &started, &missing)
+		&storedDay, &sport, &duration, &distance, &speed, &battery, &started, &missing)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if day != a.Day || sport != a.Sport || duration != "3661.123456789012345" || distance != "0" || speed != "0.0000000001" || battery != "-12" || !started.Equal(a.StartedAt) || !missing {
-		t.Fatalf("stored activity values differ: day=%s sport=%s duration=%s distance=%s speed=%s battery=%s started=%s name_null=%v", day, sport, duration, distance, speed, battery, started, missing)
+	if storedDay != "2026-10-26" || sport != a.Type.Key || duration != "3661.123456789012345" || distance != "0" || speed != "0.0000000001" || battery != "-12" || !started.Equal(time.Date(2026, 10, 25, 23, 15, 0, 0, time.UTC)) || !missing {
+		t.Fatalf("stored activity values differ: day=%s sport=%s duration=%s distance=%s speed=%s battery=%s started=%s name_null=%v", storedDay, sport, duration, distance, speed, battery, started, missing)
 	}
 	if err := conn.QueryRow(ctx, `SELECT volume_g::text FROM activity_exercises WHERE activity_id=9001 AND exercise_index=0`).Scan(&volume); err != nil || volume != "120000.123456789" {
 		t.Fatalf("exercise volume=%s err=%v", volume, err)
@@ -70,17 +72,17 @@ func TestIntegrationActivityUpsertAndExerciseSnapshot(t *testing.T) {
 	if err := conn.QueryRow(ctx, "SELECT xmin::text FROM activities WHERE activity_id=9001").Scan(&xminBefore); err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := saveActivities(ctx, conn, []garmin.Activity{a}, a.Day, a.Day); err != nil || changed != 0 {
+	if changed, err := saveActivities(ctx, conn, []garmin.Activity{a}, day, day); err != nil || changed != 0 {
 		t.Fatalf("repeat save changed=%d err=%v", changed, err)
 	}
 	if err := conn.QueryRow(ctx, "SELECT xmin::text FROM activities WHERE activity_id=9001").Scan(&xminAfter); err != nil || xminAfter != xminBefore {
 		t.Fatalf("unchanged activity rewritten: before=%s after=%s err=%v", xminBefore, xminAfter, err)
 	}
 	corrected := a
-	corrected.Name = nil
-	corrected.DistanceM = nil
+	corrected.Name = ""
+	corrected.Distance = nil
 	corrected.Exercises = corrected.Exercises[:1]
-	if changed, err := saveActivities(ctx, conn, []garmin.Activity{corrected}, a.Day, a.Day); err != nil || changed != 2 {
+	if changed, err := saveActivities(ctx, conn, []garmin.Activity{corrected}, day, day); err != nil || changed != 2 {
 		t.Fatalf("correction and exercise removal changed=%d err=%v", changed, err)
 	}
 	var exerciseCount, dailyCount int
@@ -90,7 +92,7 @@ func TestIntegrationActivityUpsertAndExerciseSnapshot(t *testing.T) {
 	if err := conn.QueryRow(ctx, "SELECT count(*) FROM daily_health").Scan(&dailyCount); err != nil || dailyCount != 0 {
 		t.Fatalf("activity incorrectly requires daily row: count=%d err=%v", dailyCount, err)
 	}
-	if changed, err := saveActivities(ctx, conn, nil, a.Day, a.Day); err != nil || changed != 0 {
+	if changed, err := saveActivities(ctx, conn, nil, day, day); err != nil || changed != 0 {
 		t.Fatalf("empty response changed=%d err=%v", changed, err)
 	}
 	var activityCount int
@@ -179,7 +181,7 @@ func TestIntegrationActivityTransactionRollsBackOnFailureAndCancellation(t *test
 	if _, err := conn.Exec(ctx, `CREATE FUNCTION reject_activity_exercise() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'simulated activity write failure'; END $$; CREATE TRIGGER reject_activity_exercise BEFORE INSERT ON activity_exercises FOR EACH ROW EXECUTE FUNCTION reject_activity_exercise()`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := saveActivities(ctx, conn, []garmin.Activity{a}, a.Day, a.Day); err == nil {
+	if _, err := saveActivities(ctx, conn, []garmin.Activity{a}, a.StartLocal[:10], a.StartLocal[:10]); err == nil {
 		t.Fatal("expected exercise write failure")
 	}
 	var count int
@@ -207,7 +209,10 @@ func TestIntegrationActivityTransactionRollsBackOnFailureAndCancellation(t *test
 	writeCtx, cancel := context.WithCancel(ctx)
 	pid := conn.PgConn().PID()
 	result := make(chan error, 1)
-	go func() { _, err := saveActivities(writeCtx, conn, []garmin.Activity{a}, a.Day, a.Day); result <- err }()
+	go func() {
+		_, err := saveActivities(writeCtx, conn, []garmin.Activity{a}, a.StartLocal[:10], a.StartLocal[:10])
+		result <- err
+	}()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		var paused bool
@@ -245,7 +250,7 @@ func TestIntegrationActivityPageFailureWritesNothing(t *testing.T) {
 		}
 		calls++
 		if r.URL.Query().Get("start") == "0" {
-			items := make([]string, 99)
+			items := make([]string, 100)
 			for i := range items {
 				items[i] = fmt.Sprintf(`{"activityId":%d,"startTimeLocal":"2026-10-26 00:15:00","startTimeGMT":"2026-10-25 23:15:00","activityType":{"typeKey":"cycling"}}`, i+1)
 			}
@@ -271,5 +276,52 @@ func TestIntegrationActivityPageFailureWritesNothing(t *testing.T) {
 	}
 	if calls != 4 {
 		t.Fatalf("activity requests=%d, want one successful page plus three failed attempts", calls)
+	}
+}
+
+func TestIntegrationSyncPersistsParentAndNormalButNotChild(t *testing.T) {
+	ctx := context.Background()
+	conn := testDatabase(t)
+	var activityRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/personalapitoken-service/personal-api/personal-api-key/token" {
+			fmt.Fprint(w, "test.bearer.token")
+			return
+		}
+		if r.URL.Path != "/activitylist-service/activities/search/activities" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		activityRequests++
+		if r.URL.Query().Get("excludeChildren") != "false" {
+			t.Error("activity fetch hid child sessions before the explicit persistence filter")
+		}
+		if r.URL.Query().Get("start") == "3" {
+			fmt.Fprint(w, `[]`)
+			return
+		}
+		fmt.Fprint(w, `[
+			{"activityId":101,"activityName":"multisport","isParent":true,"startTimeLocal":"2026-10-26 08:00:00","startTimeGMT":"2026-10-26 08:00:00","activityType":{"typeKey":"multi_sport"}},
+			{"activityId":102,"activityName":"child leg","parentId":101,"startTimeLocal":"2026-10-26 08:00:00","startTimeGMT":"2026-10-26 08:00:00","activityType":{"typeKey":"running"}},
+			{"activityId":103,"activityName":"normal","parentId":0,"startTimeLocal":"2026-10-26 09:00:00","startTimeGMT":"2026-10-26 09:00:00","activityType":{"typeKey":"cycling"}}
+		]`)
+	}))
+	defer server.Close()
+	c := garmin.NewClient(server.URL, server.Client())
+	if err := c.Authenticate(ctx, "test-key"); err != nil {
+		t.Fatal(err)
+	}
+	day := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
+	var out strings.Builder
+	if err := syncActivitiesRange(ctx, c, conn, day, day, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "activities=2 changed_rows=2\n" || activityRequests != 2 {
+		t.Fatalf("summary=%q activity requests=%d", out.String(), activityRequests)
+	}
+	var persisted string
+	if err := conn.QueryRow(ctx, "SELECT string_agg(activity_id::text, ',' ORDER BY activity_id) FROM activities").Scan(&persisted); err != nil || persisted != "101,103" {
+		t.Fatalf("persisted IDs=%q err=%v, want top-level parent and normal activity", persisted, err)
 	}
 }
