@@ -13,8 +13,9 @@ to PostgreSQL.
 1. Create a PostgreSQL database or schema for one Garmin account, with a role
    allowed to create its tables. Additional accounts need separate databases
    or schemas.
-2. Supply `DATABASE_URL` and `GARMIN_API_KEY` through your secret manager or
-   process environment. Keep real values out of Git and command-line arguments.
+2. Supply database connection settings (`DATABASE_URL`, `PG*` or both) and
+   `GARMIN_API_KEY` through your secret manager or process environment. Keep real
+   values out of Git and command-line arguments.
 3. Pin `ghcr.io/zewelor/garmin-daily` to the digest in the publication job summary.
 4. Run `migrate` against the selected database/schema. It creates or upgrades
    all six data tables and records versions in `schema_migrations`, in one
@@ -23,10 +24,14 @@ to PostgreSQL.
    the daily dates, activity and weight summaries, then repeat it. With unchanged
    source data, all writes should report `changed_rows=0`.
 
-Use the connection string's `search_path` parameter to select a schema. pgx also
-accepts `PGHOST`, `PGUSER` and `PGPASSWORD`, so credentials need not be embedded
-in the URL. Configure TLS for your server; the `sslmode=disable` setting in
-Compose is for local testing only.
+Use the connection string's `search_path` parameter to select a schema. Database
+connection settings can live entirely in `DATABASE_URL` (Option A), entirely in
+the standard `PG*` environment variables (Option B, with `DATABASE_URL` omitted),
+or in both (Option C). In Option C, fields explicitly set in the URL take
+precedence over `PG*`. See the [configuration guide](usage.md#configuration).
+
+Configure TLS for your server; the `sslmode=disable` setting in Compose is for
+local testing only.
 
 ## Upgrade an existing database
 
@@ -116,8 +121,9 @@ to an existing environment.
 ## Backups and dashboards
 
 Configure PostgreSQL backups and verify a restore before relying on the stored
-history. Use a separate read-only role for dashboards. Field mappings and units
-are documented in the [data model](data-model.md).
+history. Use a separate read-only role for dashboards. The included
+[Grafana dashboard](../dashboards/README.md) documents import, reader grants and
+file provisioning. Field mappings and units are documented in the [data model](data-model.md).
 
 When replacing another importer, compare the same date range and measurements
 first. Switch schedules after verification, preserving the existing history and

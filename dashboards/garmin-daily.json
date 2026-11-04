@@ -1,0 +1,4405 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "A quick recovery overview with details on demand. The four latest-night cards always show the latest completed main sleep, with its date and explicit stale/missing states. The chart time picker controls historical trends: daily totals exclude today; completed sleep/HRV can include today when selected. Reference days configures your local personal ranges; Garmin HRV status keeps its source definition. Select your PostgreSQL datasource, step goal and Garmin account timezone; browser timezone is the default.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 31,
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 2
+      },
+      "transparent": true,
+      "options": {
+        "mode": "markdown",
+        "content": "**Latest completed night** · The four cards below ignore the selected date range. **Charts and tables** use the date picker."
+      }
+    },
+    {
+      "id": 25,
+      "type": "stat",
+      "title": "Sleep · latest night →",
+      "description": "Main sleep duration and Garmin sleep score. A score of 80 or more is highlighted blue; duration has no invented target. These four cards always describe the same latest completed main sleep, independently of the chart time range. Its date appears on the sleep card. Older nights are gray and explicitly dated; missing readings never fall back to a different night. Click a value to explore 14 calendar dates ending with this night.",
+      "gridPos": {
+        "x": 0,
+        "y": 2,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_POSTGRESQL}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH settings AS MATERIALIZED (\n    SELECT CURRENT_TIMESTAMP AS now,\n           ${__timezone:sqlstring}::text AS timezone,\n           (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date AS today,\n           CASE WHEN ${BASELINE_DAYS:sqlstring} ~ '^[1-9][0-9]*$'\n                THEN ${BASELINE_DAYS:sqlstring}::integer\n                ELSE ('BASELINE_DAYS must be a positive integer: ' || ${BASELINE_DAYS:sqlstring})::integer\n           END AS baseline_days\n), latest_sleep AS MATERIALIZED (\n    SELECT s.*\n    FROM daily_sleep AS s\n    CROSS JOIN settings AS p\n    WHERE s.day <= p.today\n      AND s.duration_s > 0\n      AND s.ended_at <= p.now\n    ORDER BY s.day DESC\n    LIMIT 1\n), night AS (\n    SELECT p.*, s.day, s.duration_s, s.score, s.heart_rate_avg, s.respiration_avg,\n           v.day AS hrv_day, v.night_avg, v.weekly_avg, v.status AS source_hrv_status,\n           CASE upper(btrim(v.status))\n               WHEN 'BALANCED' THEN 'Balanced'\n               WHEN 'UNBALANCED' THEN 'Unbalanced'\n               WHEN 'LOW' THEN 'Low'\n               WHEN 'POOR' THEN 'Poor'\n               ELSE coalesce(nullif(btrim(v.status), ''), 'No status')\n           END AS hrv_status\n    FROM settings AS p\n    LEFT JOIN latest_sleep AS s ON true\n    LEFT JOIN daily_hrv AS v ON v.day = s.day\n), compared AS (\n    SELECT n.*, ref.*,\n           CASE WHEN n.heart_rate_avg IS NULL THEN 'No data'\n                WHEN ref.hr_count <> n.baseline_days THEN ref.hr_count::text || '/' || n.baseline_days::text || ' nights'\n                WHEN n.heart_rate_avg < ref.hr_p10 THEN 'Below own P10–P90'\n                WHEN n.heart_rate_avg > ref.hr_p90 THEN 'Above own P10–P90'\n                ELSE 'Within own P10–P90' END AS hr_status,\n           CASE WHEN n.respiration_avg IS NULL THEN 'No data'\n                WHEN ref.resp_count <> n.baseline_days THEN ref.resp_count::text || '/' || n.baseline_days::text || ' nights'\n                WHEN n.respiration_avg < ref.resp_p10 THEN 'Below own P10–P90'\n                WHEN n.respiration_avg > ref.resp_p90 THEN 'Above own P10–P90'\n                ELSE 'Within own P10–P90' END AS resp_status\n    FROM night AS n\n    LEFT JOIN LATERAL (\n        SELECT count(prev.heart_rate_avg) AS hr_count,\n               percentile_cont(0.10) WITHIN GROUP (ORDER BY prev.heart_rate_avg) AS hr_p10,\n               percentile_cont(0.90) WITHIN GROUP (ORDER BY prev.heart_rate_avg) AS hr_p90,\n               count(prev.respiration_avg) AS resp_count,\n               percentile_cont(0.10) WITHIN GROUP (ORDER BY prev.respiration_avg) AS resp_p10,\n               percentile_cont(0.90) WITHIN GROUP (ORDER BY prev.respiration_avg) AS resp_p90\n        FROM daily_sleep AS prev\n        WHERE prev.day BETWEEN n.day - n.baseline_days AND n.day - 1\n          AND prev.duration_s > 0\n          AND prev.ended_at <= n.now\n    ) AS ref ON true\n)\nSELECT metric,\n       CASE WHEN c.day IS NULL THEN 'No data' ELSE m.value END AS value,\n       CASE WHEN c.day IS NULL THEN 'No completed main sleep'\n            ELSE to_char(c.day, 'YYYY-MM-DD') || ' · ' || m.detail END AS detail,\n       CASE WHEN c.day IS NULL OR c.day < c.today THEN '#8A929D'\n            WHEN m.color = 'blue' THEN '#5B8FF9'\n            WHEN m.color = 'green' THEN '#73BF69'\n            WHEN m.color = 'amber' THEN '#E5A53B'\n            WHEN m.color = 'red' THEN '#F2495C'\n            ELSE '#8A929D' END AS color,\n       coalesce(to_char(c.day, 'YYYY-MM-DD'), '') AS day,\n       CASE WHEN c.day IS NULL THEN 'No data'\n            WHEN c.day < c.today THEN 'Stale · ' || m.status\n            ELSE m.status END AS status,\n       CASE WHEN c.day IS NULL THEN 'No completed main sleep'\n            WHEN c.day < c.today THEN 'Older: ' || to_char(c.day, 'YYYY-MM-DD') || ' · Stale'\n            ELSE m.label END AS label,\n       panel_id,\n       coalesce((extract(epoch FROM ((c.day - 13)::timestamp AT TIME ZONE c.timezone)) * 1000)::bigint::text, '') AS range_from_ms,\n       coalesce((extract(epoch FROM ((c.day + 1)::timestamp AT TIME ZONE c.timezone)) * 1000 - 1)::bigint::text, '') AS range_to_ms\nFROM compared AS c\nCROSS JOIN LATERAL (VALUES\n    (1, 'sleep',\n        (c.duration_s / 3600)::text || 'h' || lpad(((c.duration_s / 60) % 60)::text, 2, '0') || 'm',\n        CASE WHEN c.score IS NULL THEN 'Sleep score missing' ELSE 'Sleep score ' || c.score::text || '/100' END,\n        CASE WHEN c.score >= 80 THEN 'blue' ELSE 'grey' END,\n        'Completed', '2',\n        to_char(c.day, 'YYYY-MM-DD') || ' · ' ||\n            CASE WHEN c.score IS NULL THEN 'Score missing' ELSE 'Score ' || c.score::text || '/100' END),\n    (2, 'hrv',\n        CASE WHEN c.hrv_day IS NULL THEN 'No data' ELSE c.hrv_status END,\n        '7-day avg ' || coalesce(c.weekly_avg::text || ' ms', 'missing') ||\n            ' · Night avg ' || coalesce(c.night_avg::text || ' ms', 'missing') ||\n            ' · Status describes 7-day average',\n        CASE c.hrv_status WHEN 'Balanced' THEN 'green' WHEN 'Unbalanced' THEN 'amber'\n                          WHEN 'Low' THEN 'red' WHEN 'Poor' THEN 'red' ELSE 'grey' END,\n        CASE WHEN c.hrv_day IS NULL THEN 'No data' ELSE c.hrv_status END, '3',\n        CASE WHEN c.hrv_day IS NULL THEN to_char(c.day, 'YYYY-MM-DD') || ' · Measurement missing'\n             ELSE '7d ' || coalesce(c.weekly_avg::text || ' ms', 'missing') ||\n                  ' · Night ' || coalesce(c.night_avg::text || ' ms', 'missing') END),\n    (3, 'sleep_hr',\n        coalesce(round(c.heart_rate_avg, 1)::text || ' bpm', 'No data'),\n        CASE WHEN c.hr_count = c.baseline_days\n             THEN 'Own P10 ' || round(c.hr_p10::numeric, 1)::text || '–P90 ' || round(c.hr_p90::numeric, 1)::text || ' bpm'\n             ELSE 'Own P10–P90 unavailable' END ||\n            ' · Prior ' || c.baseline_days::text || ' dates · ' || c.hr_count::text || '/' || c.baseline_days::text || ' nights',\n        CASE WHEN c.heart_rate_avg IS NULL OR c.hr_count <> c.baseline_days THEN 'grey'\n             WHEN c.heart_rate_avg < c.hr_p10 OR c.heart_rate_avg > c.hr_p90 THEN 'amber' ELSE 'green' END,\n        c.hr_status, '14',\n        CASE WHEN c.heart_rate_avg IS NULL THEN to_char(c.day, 'YYYY-MM-DD') || ' · Measurement missing'\n             WHEN c.hr_count <> c.baseline_days THEN 'Reference incomplete · ' || c.hr_count::text || '/' || c.baseline_days::text || ' nights'\n             ELSE CASE WHEN c.heart_rate_avg < c.hr_p10 THEN 'Below' WHEN c.heart_rate_avg > c.hr_p90 THEN 'Above' ELSE 'Within' END ||\n                  ' usual ' || round(c.hr_p10::numeric, 1)::text || '–' || round(c.hr_p90::numeric, 1)::text ||\n                  ' · ' || c.baseline_days::text || ' nights' END),\n    (4, 'respiration',\n        coalesce(round(c.respiration_avg, 1)::text || ' /min', 'No data'),\n        CASE WHEN c.resp_count = c.baseline_days\n             THEN 'Own P10 ' || round(c.resp_p10::numeric, 1)::text || '–P90 ' || round(c.resp_p90::numeric, 1)::text || ' breaths/min'\n             ELSE 'Own P10–P90 unavailable' END ||\n            ' · Prior ' || c.baseline_days::text || ' dates · ' || c.resp_count::text || '/' || c.baseline_days::text || ' nights',\n        CASE WHEN c.respiration_avg IS NULL OR c.resp_count <> c.baseline_days THEN 'grey'\n             WHEN c.respiration_avg < c.resp_p10 OR c.respiration_avg > c.resp_p90 THEN 'amber' ELSE 'green' END,\n        c.resp_status, '15',\n        CASE WHEN c.respiration_avg IS NULL THEN to_char(c.day, 'YYYY-MM-DD') || ' · Measurement missing'\n             WHEN c.resp_count <> c.baseline_days THEN 'Reference incomplete · ' || c.resp_count::text || '/' || c.baseline_days::text || ' nights'\n             ELSE CASE WHEN c.respiration_avg < c.resp_p10 THEN 'Below' WHEN c.respiration_avg > c.resp_p90 THEN 'Above' ELSE 'Within' END ||\n                  ' usual ' || round(c.resp_p10::numeric, 1)::text || '–' || round(c.resp_p90::numeric, 1)::text ||\n                  ' · ' || c.baseline_days::text || ' nights' END)\n) AS m(row_order, metric, value, detail, color, status, panel_id, label)\nWHERE c.baseline_days > 0\nORDER BY m.row_order;",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "fieldName": "metric",
+                "config": {
+                  "id": "equal",
+                  "options": {
+                    "value": "sleep"
+                  }
+                }
+              }
+            ],
+            "match": "all",
+            "type": "include"
+          }
+        },
+        {
+          "id": "rowsToFields",
+          "options": {
+            "mappings": [
+              {
+                "fieldName": "label",
+                "handlerKey": "field.name"
+              },
+              {
+                "fieldName": "value",
+                "handlerKey": "field.value"
+              },
+              {
+                "fieldName": "color",
+                "handlerKey": "color"
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8A929D"
+          },
+          "displayName": "${__field.name}",
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(?!No completed main sleep$).+"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Explore latest night · 14 dates through ${__field.labels.day}",
+                    "url": "d/${__dashboard.uid}?viewPanel=panel-${__field.labels.panel_id}&from=${__field.labels.range_from_ms}&to=${__field.labels.range_to_ms}&timezone=${__timezone:percentencode}&var-DS_POSTGRESQL=${DS_POSTGRESQL:percentencode}&var-STEP_GOAL=${STEP_GOAL:percentencode}&var-BASELINE_DAYS=${BASELINE_DAYS:percentencode}",
+                    "targetBlank": false
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": false,
+        "text": {
+          "titleSize": 16,
+          "valueSize": 36
+        }
+      }
+    },
+    {
+      "id": 26,
+      "type": "stat",
+      "title": "HRV status · 7 days →",
+      "description": "Garmin's source HRV status describes its seven-day average, not the single-night value. Both averages are shown in milliseconds. Green=Balanced, amber=Unbalanced, red=Low/Poor; unknown or missing status is gray. These four cards always describe the same latest completed main sleep, independently of the chart time range. Its date appears on the sleep card. Older nights are gray and explicitly dated; missing readings never fall back to a different night. Click a value to explore 14 calendar dates ending with this night.",
+      "gridPos": {
+        "x": 6,
+        "y": 2,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Dashboard --"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "-- Dashboard --"
+          },
+          "panelId": 25,
+          "withTransforms": false,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "fieldName": "metric",
+                "config": {
+                  "id": "equal",
+                  "options": {
+                    "value": "hrv"
+                  }
+                }
+              }
+            ],
+            "match": "all",
+            "type": "include"
+          }
+        },
+        {
+          "id": "rowsToFields",
+          "options": {
+            "mappings": [
+              {
+                "fieldName": "label",
+                "handlerKey": "field.name"
+              },
+              {
+                "fieldName": "value",
+                "handlerKey": "field.value"
+              },
+              {
+                "fieldName": "color",
+                "handlerKey": "color"
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8A929D"
+          },
+          "displayName": "${__field.name}",
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(?!No completed main sleep$).+"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Explore latest night · 14 dates through ${__field.labels.day}",
+                    "url": "d/${__dashboard.uid}?viewPanel=panel-${__field.labels.panel_id}&from=${__field.labels.range_from_ms}&to=${__field.labels.range_to_ms}&timezone=${__timezone:percentencode}&var-DS_POSTGRESQL=${DS_POSTGRESQL:percentencode}&var-STEP_GOAL=${STEP_GOAL:percentencode}&var-BASELINE_DAYS=${BASELINE_DAYS:percentencode}",
+                    "targetBlank": false
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": false,
+        "text": {
+          "titleSize": 16,
+          "valueSize": 36
+        }
+      }
+    },
+    {
+      "id": 27,
+      "type": "stat",
+      "title": "Sleep heart rate →",
+      "description": "Average heart rate during sleep, not daily resting heart rate. Green=within your own prior P10–P90 range; amber=above or below it. Reference days controls the preceding calendar window; every date must contain a completed main sleep and this measurement. Insufficient history is gray. The comparison is descriptive, not a medical threshold or Garmin Health Status. These four cards always describe the same latest completed main sleep, independently of the chart time range. Its date appears on the sleep card. Older nights are gray and explicitly dated; missing readings never fall back to a different night. Click a value to explore 14 calendar dates ending with this night.",
+      "gridPos": {
+        "x": 12,
+        "y": 2,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Dashboard --"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "-- Dashboard --"
+          },
+          "panelId": 25,
+          "withTransforms": false,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "fieldName": "metric",
+                "config": {
+                  "id": "equal",
+                  "options": {
+                    "value": "sleep_hr"
+                  }
+                }
+              }
+            ],
+            "match": "all",
+            "type": "include"
+          }
+        },
+        {
+          "id": "rowsToFields",
+          "options": {
+            "mappings": [
+              {
+                "fieldName": "label",
+                "handlerKey": "field.name"
+              },
+              {
+                "fieldName": "value",
+                "handlerKey": "field.value"
+              },
+              {
+                "fieldName": "color",
+                "handlerKey": "color"
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8A929D"
+          },
+          "displayName": "${__field.name}",
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(?!No completed main sleep$).+"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Explore latest night · 14 dates through ${__field.labels.day}",
+                    "url": "d/${__dashboard.uid}?viewPanel=panel-${__field.labels.panel_id}&from=${__field.labels.range_from_ms}&to=${__field.labels.range_to_ms}&timezone=${__timezone:percentencode}&var-DS_POSTGRESQL=${DS_POSTGRESQL:percentencode}&var-STEP_GOAL=${STEP_GOAL:percentencode}&var-BASELINE_DAYS=${BASELINE_DAYS:percentencode}",
+                    "targetBlank": false
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": false,
+        "text": {
+          "titleSize": 16,
+          "valueSize": 36
+        }
+      }
+    },
+    {
+      "id": 28,
+      "type": "stat",
+      "title": "Sleep respiration →",
+      "description": "Average breathing rate during the same latest completed main sleep, in breaths per minute (/min). Average breathing rate during sleep. Green=within your own prior P10–P90 range; amber=above or below it. Reference days controls the preceding calendar window; every date must contain a completed main sleep and this measurement. Insufficient history is gray. The comparison is descriptive, not a medical threshold or Garmin Health Status. These four cards always describe the same latest completed main sleep, independently of the chart time range. Its date appears on the sleep card. Older nights are gray and explicitly dated; missing readings never fall back to a different night. Click a value to explore 14 calendar dates ending with this night.",
+      "gridPos": {
+        "x": 18,
+        "y": 2,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Dashboard --"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "datasource",
+            "uid": "-- Dashboard --"
+          },
+          "panelId": 25,
+          "withTransforms": false,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "filterByValue",
+          "options": {
+            "filters": [
+              {
+                "fieldName": "metric",
+                "config": {
+                  "id": "equal",
+                  "options": {
+                    "value": "respiration"
+                  }
+                }
+              }
+            ],
+            "match": "all",
+            "type": "include"
+          }
+        },
+        {
+          "id": "rowsToFields",
+          "options": {
+            "mappings": [
+              {
+                "fieldName": "label",
+                "handlerKey": "field.name"
+              },
+              {
+                "fieldName": "value",
+                "handlerKey": "field.value"
+              },
+              {
+                "fieldName": "color",
+                "handlerKey": "color"
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8A929D"
+          },
+          "displayName": "${__field.name}",
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(?!No completed main sleep$).+"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Explore latest night · 14 dates through ${__field.labels.day}",
+                    "url": "d/${__dashboard.uid}?viewPanel=panel-${__field.labels.panel_id}&from=${__field.labels.range_from_ms}&to=${__field.labels.range_to_ms}&timezone=${__timezone:percentencode}&var-DS_POSTGRESQL=${DS_POSTGRESQL:percentencode}&var-STEP_GOAL=${STEP_GOAL:percentencode}&var-BASELINE_DAYS=${BASELINE_DAYS:percentencode}",
+                    "targetBlank": false
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": false,
+        "text": {
+          "titleSize": 16,
+          "valueSize": 36
+        }
+      }
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_POSTGRESQL}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#77808C",
+            "mode": "fixed"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Sleep period (h:min)",
+            "axisPlacement": "left",
+            "drawStyle": "bars",
+            "fillOpacity": 68,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 0,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "sleep",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "barAlignment": 1,
+            "barWidthFactor": 0.55
+          },
+          "decimals": 1,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#77808C"
+              }
+            ]
+          },
+          "unit": "clocks"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Deep"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#476B9A",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Light"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#79A8C8",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "REM"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#9A82B5",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Awake"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#C9847D",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Unmeasurable"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#969DA6",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Sleep score"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 100
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#B6A6D9"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.stacking",
+                "value": {
+                  "group": "score",
+                  "mode": "none"
+                }
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "auto"
+              },
+              {
+                "id": "custom.axisColorMode",
+                "value": "series"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Sleep score (0–100)"
+              },
+              {
+                "id": "mappings",
+                "value": []
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Sleep time"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#B8C1CC"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.stacking",
+                "value": {
+                  "mode": "none",
+                  "group": "sleep-total"
+                }
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(Deep|Light|REM|Awake|Unmeasurable|Sleep time)$"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "0 min",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 16,
+        "h": 10
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT h.day::timestamp AT TIME ZONE ${__timezone:sqlstring} AS \"time\",\n       s.deep_s AS \"Deep\",\n       s.light_s AS \"Light\",\n       s.rem_s AS \"REM\",\n       s.awake_s AS \"Awake\",\n       s.unmeasurable_s AS \"Unmeasurable\",\n       s.duration_s AS \"Sleep time\",\n       s.score AS \"Sleep score\"\nFROM daily_health AS h\nLEFT JOIN daily_sleep AS s ON s.day = h.day\nWHERE h.day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date)\n  AND (h.day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date OR (h.day = (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date AND s.duration_s > 0 AND s.ended_at <= CURRENT_TIMESTAMP))\nORDER BY \"time\" ASC",
+          "refId": "A"
+        }
+      ],
+      "title": "Sleep stages (incl. awake) & score",
+      "type": "timeseries",
+      "description": "Bars include sleep stages, awake time and unmeasurable time. Sleep time in the tooltip is the reported main sleep duration, excluding naps and awake time; it is not the full bar height. Durations use hours and minutes. Sleep score has its own 0–100 right axis. Past Garmin dates plus a completed main sleep ending today when today is selected. Incomplete current-night data stays hidden."
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_POSTGRESQL}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#77808C"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "min": 0,
+          "unit": "locale",
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Steps",
+            "axisPlacement": "left",
+            "drawStyle": "bars",
+            "fillOpacity": 86,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 0,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "steps",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "barAlignment": 1,
+            "barWidthFactor": 0.8
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "7-day average"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#9AB8F5"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.stacking",
+                "value": {
+                  "group": "average",
+                  "mode": "none"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Below goal"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#E5A53B"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Goal met"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73BF69"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Step goal"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#B8C1CC"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.stacking",
+                "value": {
+                  "group": "goal",
+                  "mode": "none"
+                }
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 7,
+        "w": 8,
+        "h": 10
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH settings AS MATERIALIZED (\n    SELECT CASE WHEN ${STEP_GOAL:sqlstring} ~ '^[1-9][0-9]*$' THEN ${STEP_GOAL:sqlstring}::integer ELSE ('STEP_GOAL must be a positive whole integer: ' || ${STEP_GOAL:sqlstring})::integer END AS step_goal\n), history AS (\n    SELECT h.day, h.steps, p.step_goal,\n           CASE WHEN count(h.steps) OVER seven_days = 7\n                THEN avg(h.steps) OVER seven_days END AS steps_avg\n    FROM daily_health AS h\n    CROSS JOIN settings AS p\n    WHERE h.day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date - 6) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date)\n      AND h.day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date\n    WINDOW seven_days AS (ORDER BY h.day RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW)\n)\nSELECT day::timestamp AT TIME ZONE ${__timezone:sqlstring} AS \"time\",\n       CASE WHEN steps < step_goal THEN steps END AS \"Below goal\",\n       CASE WHEN steps >= step_goal THEN steps END AS \"Goal met\",\n       steps_avg AS \"7-day average\",\n       step_goal AS \"Step goal\"\nFROM history\nWHERE day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date)\n  AND day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date\nORDER BY \"time\" ASC",
+          "refId": "A"
+        }
+      ],
+      "title": "Daily steps · goal ${STEP_GOAL}",
+      "type": "timeseries",
+      "description": "Completed Garmin dates only. Amber bars are below the selected step goal; green bars reach it. The gray dashed line is the goal; the blue line is the mean of seven consecutive dates with measurements. Missing measurements leave a gap."
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_POSTGRESQL}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#5B8FF9",
+            "mode": "fixed"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "HRV (ms)",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#5B8FF9"
+              }
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Garmin weekly average"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#B6A6D9"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Baseline low"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#8A929D",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    6,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Baseline high"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#8A929D",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.fillBelowTo",
+                "value": "Baseline low"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 16
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    6,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "displayName",
+                "value": "Garmin range · upper"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 12,
+        "h": 8
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "asc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT h.day::timestamp AT TIME ZONE ${__timezone:sqlstring} AS \"time\",\n       v.night_avg AS \"Nightly average\",\n       v.weekly_avg AS \"Garmin weekly average\",\n       v.baseline_low AS \"Baseline low\",\n       v.baseline_high AS \"Baseline high\"\nFROM daily_health AS h\nLEFT JOIN daily_sleep AS s ON s.day = h.day\nLEFT JOIN daily_hrv AS v ON v.day = h.day\nWHERE h.day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date)\n  AND (h.day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date OR (h.day = (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date AND s.duration_s > 0 AND s.ended_at <= CURRENT_TIMESTAMP))\nORDER BY \"time\" ASC",
+          "refId": "A"
+        }
+      ],
+      "title": "HRV · Garmin personal range",
+      "type": "timeseries",
+      "description": "The gray band is Garmin's reported personal HRV range; both bounds remain in the tooltip. Blue is the nightly average; purple is Garmin's weekly average. All HRV values are milliseconds. This is a personal reference, not a fixed population threshold. Past Garmin dates plus a completed main sleep ending today when today is selected. Incomplete current-night data stays hidden."
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_POSTGRESQL}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#5B8FF9"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "Resting HR (bpm)",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          },
+          "unit": "bpm"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Prior P10"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8A929D"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    5,
+                    4
+                  ]
+                }
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Prior P90"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8A929D"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    5,
+                    4
+                  ]
+                }
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.fillBelowTo",
+                "value": "Prior P10"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 14
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "displayName",
+                "value": "Previous ${BASELINE_DAYS} days · upper"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Outside usual range"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#E5A53B"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "points"
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 6
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 17,
+        "w": 12,
+        "h": 8
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "asc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH params AS (\n    SELECT (CASE WHEN ${BASELINE_DAYS:sqlstring}::integer > 0\n                 THEN ${BASELINE_DAYS:sqlstring}\n                 ELSE 'Reference days must be a positive integer'\n            END)::integer AS baseline_days\n)\nSELECT h.day::timestamp AT TIME ZONE ${__timezone:sqlstring} AS \"time\",\n       h.heart_rate_resting AS \"Resting heart rate\",\n       ref.p10 AS \"Prior P10\", ref.p90 AS \"Prior P90\",\n       CASE WHEN h.heart_rate_resting < ref.p10 OR h.heart_rate_resting > ref.p90\n            THEN h.heart_rate_resting END AS \"Outside usual range\"\nFROM daily_health AS h\nCROSS JOIN params AS p\nCROSS JOIN LATERAL (\n    SELECT CASE WHEN count(prev.heart_rate_resting) = p.baseline_days\n                THEN percentile_cont(0.10) WITHIN GROUP (ORDER BY prev.heart_rate_resting) END AS p10,\n           CASE WHEN count(prev.heart_rate_resting) = p.baseline_days\n                THEN percentile_cont(0.90) WITHIN GROUP (ORDER BY prev.heart_rate_resting) END AS p90\n    FROM daily_health AS prev\n    WHERE prev.day BETWEEN h.day - p.baseline_days AND h.day - 1\n) AS ref\nWHERE h.day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date)\n  AND h.day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date\nORDER BY \"time\" ASC",
+          "refId": "A"
+        }
+      ],
+      "title": "Resting HR · previous ${BASELINE_DAYS} days",
+      "type": "timeseries",
+      "description": "The gray band is your own P10–P90 range from the previous ${BASELINE_DAYS} calendar dates, excluding the plotted date. It appears only when all ${BASELINE_DAYS} prior dates have valid resting heart rate readings. Amber points are outside that personal historical band; this is neither a Garmin classification nor a medical threshold. Both boundaries are available in the tooltip. Reference days must be a positive whole number; invalid input fails the query. Completed Garmin dates only."
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 24,
+        "h": 1
+      },
+      "id": 30,
+      "panels": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "#5B8FF9"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "Body Battery (0–100)",
+                "axisPlacement": "auto",
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 4,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "decimals": 0,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  }
+                ]
+              },
+              "unit": "none",
+              "min": 0,
+              "max": 100
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Daily minimum"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#8A929D"
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        5,
+                        4
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Daily maximum"
+                },
+                "properties": [
+                  {
+                    "id": "custom.fillBelowTo",
+                    "value": "Daily minimum"
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#5B8FF9"
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 2
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 12
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Last daily reading"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "legend": true,
+                      "tooltip": false,
+                      "viz": false
+                    }
+                  },
+                  {
+                    "id": "custom.drawStyle",
+                    "value": "line"
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.showPoints",
+                    "value": "never"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 26,
+            "w": 8,
+            "h": 8
+          },
+          "id": 4,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "asc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "time_series",
+              "rawQuery": true,
+              "rawSql": "SELECT h.day::timestamp AT TIME ZONE ${__timezone:sqlstring} AS \"time\", h.body_battery_min AS \"Daily minimum\",\n       h.body_battery_latest AS \"Last daily reading\",\n       h.body_battery_max AS \"Daily maximum\"\nFROM daily_health AS h\nWHERE h.day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date)\n  AND h.day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date\nORDER BY \"time\" ASC",
+              "refId": "A"
+            }
+          ],
+          "title": "Body Battery · daily range",
+          "type": "timeseries",
+          "description": "Completed Garmin dates only. Blue: daily maximum; gray: daily minimum; shaded band: daily range. The last recorded reading remains in the tooltip. A daily maximum is not necessarily the reading on waking."
+        },
+        {
+          "id": 9,
+          "title": "Average stress · day & sleep",
+          "type": "timeseries",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 26,
+            "w": 8,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "#5B8FF9"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "Garmin stress (0–100)",
+                "axisPlacement": "auto",
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 4,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "decimals": 0,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#5B8FF9"
+                  }
+                ]
+              },
+              "unit": "none",
+              "min": 0,
+              "max": 100
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Day maximum"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#8A929D"
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "legend": true,
+                      "tooltip": false,
+                      "viz": false
+                    }
+                  },
+                  {
+                    "id": "custom.drawStyle",
+                    "value": "line"
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.showPoints",
+                    "value": "never"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Sleep average"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#9A82B5"
+                    }
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  }
+                ]
+              }
+            ]
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "time_series",
+              "rawQuery": true,
+              "rawSql": "SELECT h.day::timestamp AT TIME ZONE ${__timezone:sqlstring} AS \"time\",\n       h.stress_avg AS \"Day average\", h.stress_max AS \"Day maximum\",\n       s.stress_avg AS \"Sleep average\"\nFROM daily_health AS h\nLEFT JOIN daily_sleep AS s ON s.day = h.day\nWHERE h.day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date)\n  AND h.day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date\nORDER BY \"time\" ASC",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "description": "Completed Garmin dates only. Blue: daily average; purple: sleep average. The daily maximum remains in the tooltip and daily details. Values are summaries on Garmin's 0–100 scale, not an intraday trace; missing sleep readings remain gaps."
+        },
+        {
+          "id": 8,
+          "title": "Daily calories burned",
+          "type": "timeseries",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 26,
+            "w": 8,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "#5B8FF9"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "Calories / day",
+                "axisPlacement": "auto",
+                "drawStyle": "bars",
+                "fillOpacity": 80,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 0,
+                "pointSize": 4,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "calories",
+                  "mode": "normal"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                },
+                "barAlignment": 1,
+                "barWidthFactor": 0.8
+              },
+              "decimals": 0,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#5B8FF9"
+                  }
+                ]
+              },
+              "unit": "suffix: kcal",
+              "min": 0
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Resting"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#77808C"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Active"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#5B8FF9"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Reported total"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#B5BEC9"
+                    }
+                  },
+                  {
+                    "id": "custom.drawStyle",
+                    "value": "line"
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.stacking",
+                    "value": {
+                      "group": "total",
+                      "mode": "none"
+                    }
+                  },
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "legend": true,
+                      "tooltip": false,
+                      "viz": false
+                    }
+                  },
+                  {
+                    "id": "custom.showPoints",
+                    "value": "never"
+                  }
+                ]
+              }
+            ]
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "time_series",
+              "rawQuery": true,
+              "rawSql": "SELECT h.day::timestamp AT TIME ZONE ${__timezone:sqlstring} AS \"time\",\n       h.calories_active AS \"Active\", h.calories_resting AS \"Resting\",\n       h.calories_total AS \"Reported total\"\nFROM daily_health AS h\nWHERE h.day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date)\n  AND h.day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date\nORDER BY \"time\" ASC",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "description": "Completed Garmin dates only. Active calories start at zero for comparison between days; gray resting calories stack above them. The reported total remains in the tooltip and daily details, and is not assumed to equal the sum of the components. Food intake is not collected."
+        }
+      ],
+      "title": "Stress & energy",
+      "type": "row"
+    },
+    {
+      "id": 13,
+      "title": "Health details",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 14,
+          "title": "Sleep heart rate · personal range",
+          "type": "timeseries",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 27,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "#5B8FF9"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "Sleep heart rate (bpm)",
+                "axisPlacement": "auto",
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 4,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "decimals": 1,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#5B8FF9"
+                  }
+                ]
+              },
+              "unit": "bpm"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Prior P10"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#8A929D"
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        5,
+                        4
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.showPoints",
+                    "value": "never"
+                  },
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "legend": true,
+                      "tooltip": false,
+                      "viz": false
+                    }
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Prior P90"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#8A929D"
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        5,
+                        4
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.showPoints",
+                    "value": "never"
+                  },
+                  {
+                    "id": "custom.fillBelowTo",
+                    "value": "Prior P10"
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 14
+                  },
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    }
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Previous ${BASELINE_DAYS} days · upper"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Outside usual range"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#E5A53B"
+                    }
+                  },
+                  {
+                    "id": "custom.drawStyle",
+                    "value": "points"
+                  },
+                  {
+                    "id": "custom.showPoints",
+                    "value": "always"
+                  },
+                  {
+                    "id": "custom.pointSize",
+                    "value": 6
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  }
+                ]
+              }
+            ]
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "time_series",
+              "rawQuery": true,
+              "rawSql": "WITH settings AS MATERIALIZED (\n  SELECT CASE WHEN ${BASELINE_DAYS:sqlstring} ~ '^[1-9][0-9]*$'\n              THEN ${BASELINE_DAYS:sqlstring}::integer\n              ELSE ('BASELINE_DAYS must be a positive integer: ' || ${BASELINE_DAYS:sqlstring})::integer END AS days\n)\nSELECT h.day::timestamp AT TIME ZONE ${__timezone:sqlstring} AS \"time\",\n       s.heart_rate_avg AS \"Average sleep heart rate\",\n       ref.p10 AS \"Prior P10\", ref.p90 AS \"Prior P90\",\n       CASE WHEN s.heart_rate_avg < ref.p10 OR s.heart_rate_avg > ref.p90 THEN s.heart_rate_avg END AS \"Outside usual range\"\nFROM daily_health AS h\nLEFT JOIN daily_sleep AS s ON s.day = h.day\nCROSS JOIN settings AS cfg\nCROSS JOIN LATERAL (\n  SELECT CASE WHEN count(prev.heart_rate_avg) = cfg.days THEN percentile_cont(0.10) WITHIN GROUP (ORDER BY prev.heart_rate_avg) END AS p10,\n         CASE WHEN count(prev.heart_rate_avg) = cfg.days THEN percentile_cont(0.90) WITHIN GROUP (ORDER BY prev.heart_rate_avg) END AS p90\n  FROM daily_sleep AS prev\n  WHERE prev.day BETWEEN h.day - cfg.days AND h.day - 1\n    AND prev.duration_s > 0 AND prev.ended_at <= CURRENT_TIMESTAMP\n) AS ref\nWHERE h.day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date)\n  AND (h.day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date OR (h.day = (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date AND s.duration_s > 0 AND s.ended_at <= CURRENT_TIMESTAMP))\nORDER BY \"time\"",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "description": "Blue is the sleep measurement. The gray band is your P10–P90 from the previous ${BASELINE_DAYS} calendar dates, excluding the plotted night. Every prior date needs a completed main sleep and this measurement; missing history suppresses the band. Amber marks values outside this descriptive personal range, not a medical threshold or Garmin Health Status. A completed main sleep ending today is included when today is selected."
+        },
+        {
+          "id": 15,
+          "title": "Respiration · day, sleep & personal range",
+          "type": "timeseries",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 27,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "#5B8FF9"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "Breaths / min",
+                "axisPlacement": "auto",
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "pointSize": 4,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#5B8FF9"
+                  }
+                ]
+              },
+              "unit": "suffix: /min",
+              "decimals": 1
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Prior P10"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#8A929D"
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        5,
+                        4
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.showPoints",
+                    "value": "never"
+                  },
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "legend": true,
+                      "tooltip": false,
+                      "viz": false
+                    }
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Prior P90"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#8A929D"
+                    }
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 1
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        5,
+                        4
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.showPoints",
+                    "value": "never"
+                  },
+                  {
+                    "id": "custom.fillBelowTo",
+                    "value": "Prior P10"
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 14
+                  },
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    }
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Previous ${BASELINE_DAYS} days · upper"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Outside usual range"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#E5A53B"
+                    }
+                  },
+                  {
+                    "id": "custom.drawStyle",
+                    "value": "points"
+                  },
+                  {
+                    "id": "custom.showPoints",
+                    "value": "always"
+                  },
+                  {
+                    "id": "custom.pointSize",
+                    "value": 6
+                  },
+                  {
+                    "id": "custom.lineWidth",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Day average"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#B6A6D9"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "time_series",
+              "rawQuery": true,
+              "rawSql": "WITH settings AS MATERIALIZED (\n  SELECT CASE WHEN ${BASELINE_DAYS:sqlstring} ~ '^[1-9][0-9]*$'\n              THEN ${BASELINE_DAYS:sqlstring}::integer\n              ELSE ('BASELINE_DAYS must be a positive integer: ' || ${BASELINE_DAYS:sqlstring})::integer END AS days\n)\nSELECT h.day::timestamp AT TIME ZONE ${__timezone:sqlstring} AS \"time\",\n       CASE WHEN h.day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date THEN h.respiration_avg END AS \"Day average\",\n       s.respiration_avg AS \"Sleep average\",\n       ref.p10 AS \"Prior P10\", ref.p90 AS \"Prior P90\",\n       CASE WHEN s.respiration_avg < ref.p10 OR s.respiration_avg > ref.p90 THEN s.respiration_avg END AS \"Outside usual range\"\nFROM daily_health AS h\nLEFT JOIN daily_sleep AS s ON s.day = h.day\nCROSS JOIN settings AS cfg\nCROSS JOIN LATERAL (\n  SELECT CASE WHEN count(prev.respiration_avg) = cfg.days THEN percentile_cont(0.10) WITHIN GROUP (ORDER BY prev.respiration_avg) END AS p10,\n         CASE WHEN count(prev.respiration_avg) = cfg.days THEN percentile_cont(0.90) WITHIN GROUP (ORDER BY prev.respiration_avg) END AS p90\n  FROM daily_sleep AS prev\n  WHERE prev.day BETWEEN h.day - cfg.days AND h.day - 1\n    AND prev.duration_s > 0 AND prev.ended_at <= CURRENT_TIMESTAMP\n) AS ref\nWHERE h.day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date)\n  AND (h.day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date OR (h.day = (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date AND s.duration_s > 0 AND s.ended_at <= CURRENT_TIMESTAMP))\nORDER BY \"time\"",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "description": "Blue is the sleep measurement. The gray band is your P10–P90 from the previous ${BASELINE_DAYS} calendar dates, excluding the plotted night. Every prior date needs a completed main sleep and this measurement; missing history suppresses the band. Amber marks values outside this descriptive personal range, not a medical threshold or Garmin Health Status. A completed main sleep ending today is included when today is selected. The purple day average is shown only for completed dates."
+        },
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "#77808C",
+                "mode": "fixed"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "Recorded time (h:min)",
+                "axisPlacement": "left",
+                "drawStyle": "bars",
+                "fillOpacity": 68,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 0,
+                "pointSize": 4,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "stress",
+                  "mode": "normal"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                },
+                "barAlignment": 1,
+                "barWidthFactor": 0.55
+              },
+              "decimals": 1,
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "0 min"
+                    }
+                  }
+                }
+              ],
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#77808C"
+                  }
+                ]
+              },
+              "unit": "clocks"
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Rest"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#66958B"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Low stress"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#7F94A6"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Medium stress"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#B8A273"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "High stress"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#BD8580"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Activity / unclassified"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#505C6B"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Activity"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "legend": true,
+                      "tooltip": false,
+                      "viz": true
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Unclassified"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "legend": true,
+                      "tooltip": false,
+                      "viz": true
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 35,
+            "w": 16,
+            "h": 9
+          },
+          "id": 22,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "time_series",
+              "rawQuery": true,
+              "rawSql": "SELECT day::timestamp AT TIME ZONE ${__timezone:sqlstring} AS \"time\",\n       stress_rest_ms / 1000.0 AS \"Rest\", stress_low_ms / 1000.0 AS \"Low stress\",\n       stress_medium_ms / 1000.0 AS \"Medium stress\", stress_high_ms / 1000.0 AS \"High stress\",\n       (stress_activity_ms::bigint + stress_uncategorized_ms) / 1000.0 AS \"Activity / unclassified\",\n       stress_activity_ms / 1000.0 AS \"Activity\", stress_uncategorized_ms / 1000.0 AS \"Unclassified\"\nFROM daily_health WHERE day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date\nORDER BY \"time\"",
+              "refId": "A"
+            }
+          ],
+          "title": "Stress & rest · recorded time",
+          "type": "timeseries",
+          "description": "Time Garmin classified as rest or each stress level. Activity and unclassified time share a muted contextual segment, with their separate values in the tooltip; neither is treated as low stress. Actual reported durations are not scaled to fill 24 hours. Missing values remain missing. Completed dates only."
+        },
+        {
+          "id": 24,
+          "title": "Body mass · recorded weigh-ins",
+          "type": "timeseries",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 35,
+            "w": 8,
+            "h": 9
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "#5B8FF9"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "Body mass (kg)",
+                "axisPlacement": "auto",
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 0,
+                "pointSize": 6,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "always",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#5B8FF9"
+                  }
+                ]
+              },
+              "unit": "suffix: kg",
+              "decimals": 2
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "time_series",
+              "rawQuery": true,
+              "rawSql": "SELECT measured_at AS \"time\", weight_kg AS \"Body mass\"\nFROM weight_measurements WHERE day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date\nORDER BY measured_at",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": false
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "description": "Each point is a real body-mass measurement at its recorded time, in kilograms. Multiple weigh-ins on one date remain separate. No line, interpolation, target or smoothed trend is inferred. Use the existing 30/90-day time ranges to inspect sparse history. Completed Garmin dates only; today's weigh-ins remain available in explicitly selected daily details."
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "title": "Recorded training",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 19,
+          "title": "Weekly recorded training",
+          "type": "table",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 28,
+            "w": 12,
+            "h": 9
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "WITH bounds AS (\n    SELECT (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AS selected_from,\n           LEAST((($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date), (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date - 1) AS selected_through\n), weeks AS (\n    SELECT date_trunc('week', a.day)::date AS week_start,\n           count(*) AS activities,\n           sum(a.duration_s) AS recorded_seconds,\n           count(a.duration_s) AS with_duration\n    FROM activities AS a\n    CROSS JOIN bounds AS b\n    WHERE a.day BETWEEN b.selected_from AND b.selected_through\n    GROUP BY date_trunc('week', a.day)::date\n)\nSELECT greatest(w.week_start, b.selected_from)::text || ' – ' || least(w.week_start + 6, b.selected_through)::text AS \"Dates\",\n       w.activities AS \"Activities\",\n       CASE WHEN w.recorded_seconds IS NOT NULL THEN (floor(w.recorded_seconds / 60.0)::bigint / 60)::text || ' h ' || lpad((floor(w.recorded_seconds / 60.0)::bigint % 60)::text, 2, '0') || ' min' END AS \"Recorded time\",\n       w.with_duration AS \"With duration\"\nFROM weeks AS w\nCROSS JOIN bounds AS b\nORDER BY w.week_start DESC",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "minWidth": 90
+              },
+              "noValue": "-",
+              "mappings": []
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Dates"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 240
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "cellHeight": "sm",
+            "showHeader": true,
+            "footer": {
+              "show": false
+            }
+          },
+          "description": "Monday-based weekly totals for the selected dates. The default range covers four completed Monday–Sunday weeks. Dates show the actual selected interval for each row; custom ranges may cover fewer than seven days. Missing measurements are not converted to zero."
+        },
+        {
+          "id": 23,
+          "title": "Training HR zones · * incomplete measurements",
+          "type": "barchart",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 28,
+            "w": 12,
+            "h": 9
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "#5B8FF9"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "Zone time (duration)",
+                "axisPlacement": "auto",
+                "drawStyle": "bars",
+                "fillOpacity": 75,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 0,
+                "pointSize": 4,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "activity",
+                  "mode": "normal"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                },
+                "barAlignment": 1,
+                "barWidthFactor": 0.8
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#5B8FF9"
+                  }
+                ]
+              },
+              "unit": "dtdurations",
+              "min": 0,
+              "decimals": 1
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Z1"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#6B7C93"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Z2"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#6A9EAD"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Z3"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#7F9DC6"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Z4"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#A38BB5"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Z5"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#C59A77"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "WITH sessions AS (\n    SELECT *, (heart_rate_zone_1_s IS NOT NULL AND heart_rate_zone_2_s IS NOT NULL AND heart_rate_zone_3_s IS NOT NULL AND heart_rate_zone_4_s IS NOT NULL AND heart_rate_zone_5_s IS NOT NULL) AS zones_complete\n    FROM activities WHERE day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date\n)\nSELECT to_char(day, 'MM-DD') || CASE WHEN count(*) FILTER (WHERE zones_complete) < count(*) THEN ' *' ELSE '' END AS \"Day\",\n       day::text AS \"Garmin date\",\n       count(*) FILTER (WHERE zones_complete)::text || ' of ' || count(*)::text || ' workouts' AS \"Complete zone measurements\",\n       sum(heart_rate_zone_1_s) FILTER (WHERE zones_complete) AS \"Z1\",\n       sum(heart_rate_zone_2_s) FILTER (WHERE zones_complete) AS \"Z2\",\n       sum(heart_rate_zone_3_s) FILTER (WHERE zones_complete) AS \"Z3\",\n       sum(heart_rate_zone_4_s) FILTER (WHERE zones_complete) AS \"Z4\",\n       sum(heart_rate_zone_5_s) FILTER (WHERE zones_complete) AS \"Z5\"\nFROM sessions GROUP BY day ORDER BY day",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "xField": "Day",
+            "orientation": "vertical",
+            "stacking": "normal",
+            "barWidth": 0.8,
+            "groupWidth": 0.65,
+            "showValue": "never",
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none",
+              "hideZeros": false
+            },
+            "xTickLabelRotation": -45,
+            "fullHighlight": false
+          },
+          "description": "Zone time by Garmin date. * marks a day with missing zone measurements; a gap on that day does not mean no workout. Hover for workouts with all five zones and total workouts. Only complete zone breakdowns contribute to the bars; reported zeros remain zero. Days without workouts are not shown. Z1–Z5 are Garmin source zones; bpm boundaries are not inferred. Completed dates only."
+        },
+        {
+          "id": 20,
+          "title": "Recorded activities",
+          "type": "table",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 37,
+            "w": 24,
+            "h": 10
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "WITH selected AS (\n    SELECT * FROM activities WHERE day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date)\n)\nSELECT activity_id::text AS \"Activity key\", day::text AS \"Day\", name AS \"Activity\",\n       initcap(replace(sport, '_', ' ')) AS \"Sport\",\n       CASE WHEN duration_s IS NULL THEN NULL WHEN duration_s = 0 THEN '0 min' WHEN duration_s < 60 THEN round((duration_s)::numeric, 1)::text || ' s' ELSE (floor((duration_s) / 60.0)::bigint / 60)::text || ' h ' || lpad((floor((duration_s) / 60.0)::bigint % 60)::text, 2, '0') || ' min' END AS \"Time\",\n       heart_rate_avg AS \"Avg HR\", training_effect_aerobic AS \"Aerobic TE\",\n       training_effect_anaerobic AS \"Anaerobic TE\", training_load AS \"Training load\",\n       CASE WHEN sport = 'strength_training' THEN concat(coalesce(sets::text, '-'), ' sets · ', coalesce(reps::text, '-'), ' reps')\n            WHEN sport LIKE '%diving%' AND depth_max_cm IS NOT NULL THEN concat('Max depth ', round(depth_max_cm / 100.0, 1), ' m')\n            WHEN distance_m IS NOT NULL THEN concat(round(distance_m / 1000.0, 2), ' km') END AS \"Sport details\",\n       (extract(epoch FROM ((least(day + 3, (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date - 1) - 6)::timestamp AT TIME ZONE ${__timezone:sqlstring})) * 1000)::bigint::text AS \"Week from\",\n       (extract(epoch FROM ((least(day + 3, (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date - 1) + 1)::timestamp AT TIME ZONE ${__timezone:sqlstring})) * 1000 - 1)::bigint::text AS \"Week to\",\n       metric AS \"Metric\", coalesce(value, '-') AS \"Value\"\nFROM selected CROSS JOIN LATERAL (VALUES\n    (1, 'Calories (kcal)', calories::text),\n    (2, 'Peak heart rate (bpm)', heart_rate_max::text),\n    (3, 'Body Battery change (points)', CASE WHEN body_battery_change > 0 THEN '+' || body_battery_change::text ELSE body_battery_change::text END),\n    (4, 'HR zone 1', CASE WHEN heart_rate_zone_1_s IS NULL THEN NULL WHEN heart_rate_zone_1_s = 0 THEN '0 min' WHEN heart_rate_zone_1_s < 60 THEN round((heart_rate_zone_1_s)::numeric, 1)::text || ' s' ELSE (floor((heart_rate_zone_1_s) / 60.0)::bigint / 60)::text || ' h ' || lpad((floor((heart_rate_zone_1_s) / 60.0)::bigint % 60)::text, 2, '0') || ' min' END),\n    (5, 'HR zone 2', CASE WHEN heart_rate_zone_2_s IS NULL THEN NULL WHEN heart_rate_zone_2_s = 0 THEN '0 min' WHEN heart_rate_zone_2_s < 60 THEN round((heart_rate_zone_2_s)::numeric, 1)::text || ' s' ELSE (floor((heart_rate_zone_2_s) / 60.0)::bigint / 60)::text || ' h ' || lpad((floor((heart_rate_zone_2_s) / 60.0)::bigint % 60)::text, 2, '0') || ' min' END),\n    (6, 'HR zone 3', CASE WHEN heart_rate_zone_3_s IS NULL THEN NULL WHEN heart_rate_zone_3_s = 0 THEN '0 min' WHEN heart_rate_zone_3_s < 60 THEN round((heart_rate_zone_3_s)::numeric, 1)::text || ' s' ELSE (floor((heart_rate_zone_3_s) / 60.0)::bigint / 60)::text || ' h ' || lpad((floor((heart_rate_zone_3_s) / 60.0)::bigint % 60)::text, 2, '0') || ' min' END),\n    (7, 'HR zone 4', CASE WHEN heart_rate_zone_4_s IS NULL THEN NULL WHEN heart_rate_zone_4_s = 0 THEN '0 min' WHEN heart_rate_zone_4_s < 60 THEN round((heart_rate_zone_4_s)::numeric, 1)::text || ' s' ELSE (floor((heart_rate_zone_4_s) / 60.0)::bigint / 60)::text || ' h ' || lpad((floor((heart_rate_zone_4_s) / 60.0)::bigint % 60)::text, 2, '0') || ' min' END),\n    (8, 'HR zone 5', CASE WHEN heart_rate_zone_5_s IS NULL THEN NULL WHEN heart_rate_zone_5_s = 0 THEN '0 min' WHEN heart_rate_zone_5_s < 60 THEN round((heart_rate_zone_5_s)::numeric, 1)::text || ' s' ELSE (floor((heart_rate_zone_5_s) / 60.0)::bigint / 60)::text || ' h ' || lpad((floor((heart_rate_zone_5_s) / 60.0)::bigint % 60)::text, 2, '0') || ' min' END)\n ) AS details(metric_order, metric, value)\nORDER BY started_at DESC, activity_id DESC, metric_order",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "minWidth": 90
+              },
+              "noValue": "-",
+              "mappings": []
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Week from (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hidden",
+                    "value": true
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Week to (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hidden",
+                    "value": true
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Day (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "links",
+                    "value": [
+                      {
+                        "title": "Show surrounding week",
+                        "url": "d/${__dashboard.uid}/?from=${__data.fields[\"Week from (lastNotNull)\"]}&to=${__data.fields[\"Week to (lastNotNull)\"]}&timezone=${__timezone:percentencode}&var-DS_POSTGRESQL=${DS_POSTGRESQL:percentencode}&var-STEP_GOAL=${STEP_GOAL:percentencode}&var-BASELINE_DAYS=${BASELINE_DAYS:percentencode}",
+                        "targetBlank": false
+                      }
+                    ]
+                  },
+                  {
+                    "id": "custom.width",
+                    "value": 112
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Day"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Avg HR (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "bpm"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Avg HR"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Aerobic TE (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Aerobic effect (0–5)"
+                  },
+                  {
+                    "id": "custom.width",
+                    "value": 180
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Anaerobic TE (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Anaerobic effect (0–5)"
+                  },
+                  {
+                    "id": "custom.width",
+                    "value": 180
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Training load (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Training load"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Activity (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "custom.minWidth",
+                    "value": 140
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Activity"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Activity key"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hidden",
+                    "value": true
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Sport (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Sport"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Time (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Time"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Sport details (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Sport details"
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "cellHeight": "sm",
+            "showHeader": true,
+            "footer": {
+              "show": false
+            }
+          },
+          "description": "**What do these numbers mean?**\n\n- **Aerobic effect:** endurance stimulus, such as from a steady run.\n- **Anaerobic effect:** stimulus for short, hard efforts, such as sprints. A low value after easy exercise is normal.\n- **Both use 0–5:** below 2 = minor or no effect; 2 = maintaining; 3 = improving; 4 = strongly improving; 5 = overreaching. Higher is not always better.\n- **Training load:** demand of this workout, not your 7-day total. More load means more to recover from.\n\nA dash means no estimate. Click a day to see its surrounding week; expand a row for workout details.\n\n[Garmin: Training Effect](https://www.garmin.com/en-US/garmin-technology/running-science/physiological-measurements/training-effect/)",
+          "transformations": [
+            {
+              "id": "groupToNestedTable",
+              "options": {
+                "showSubframeHeaders": true,
+                "expandAllRows": false,
+                "rules": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Activity key"
+                    },
+                    "operation": "groupby",
+                    "aggregations": []
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Day"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Activity"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Sport"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Time"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Avg HR"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Aerobic TE"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Anaerobic TE"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Training load"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Sport details"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Week from"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Week to"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "id": 21,
+          "title": "Strength exercise summaries",
+          "type": "table",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 47,
+            "w": 24,
+            "h": 9
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT a.day::text AS \"Day\", initcap(replace(coalesce(e.subcategory, e.category), '_', ' ')) AS \"Exercise\",\n       e.sets AS \"Sets\", e.reps AS \"Reps\", e.max_weight_g / 1000.0 AS \"Max weight (kg)\",\n       e.volume_g / 1000.0 AS \"Volume (kg × reps)\", CASE WHEN e.duration_ms / 1000.0 IS NOT NULL THEN (floor(e.duration_ms / 1000.0 / 60.0)::bigint / 60)::text || ' h ' || lpad((floor(e.duration_ms / 1000.0 / 60.0)::bigint % 60)::text, 2, '0') || ' min' END AS \"Time\"\nFROM activity_exercises e JOIN activities a USING(activity_id)\nWHERE a.day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date)\nORDER BY a.started_at DESC, a.activity_id DESC, e.exercise_index",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "minWidth": 90
+              },
+              "noValue": "-",
+              "mappings": []
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Max weight (kg)"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Volume (kg × reps)"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "cellHeight": "sm",
+            "showHeader": true,
+            "footer": {
+              "show": false
+            }
+          },
+          "description": "Exercise summaries are shown only when Garmin recorded them. Max weight and volume are converted from grams; volume is the sum of weight × repetitions, not an inferred training load. No exercise or missing weight is fabricated. Multiple source summary entries remain separate."
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Movement details",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 11,
+          "title": "Weekly intensity",
+          "type": "barchart",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 29,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "#5B8FF9"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "Minutes (unweighted)",
+                "axisPlacement": "auto",
+                "drawStyle": "bars",
+                "fillOpacity": 80,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 0,
+                "pointSize": 4,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "activity",
+                  "mode": "normal"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                },
+                "barAlignment": 1,
+                "barWidthFactor": 0.8
+              },
+              "decimals": 0,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#5B8FF9"
+                  }
+                ]
+              },
+              "unit": "suffix: min",
+              "min": 0
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Vigorous"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#79A8A0"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "WITH bounds AS (\n    SELECT (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AS selected_from,\n           LEAST((($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date), (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date - 1) AS selected_through\n), weeks AS (\n    SELECT date_trunc('week', h.day)::date AS week_start,\n           sum(h.moderate_minutes) AS moderate,\n           sum(h.vigorous_minutes) AS vigorous\n    FROM daily_health AS h\n    CROSS JOIN bounds AS b\n    WHERE h.day BETWEEN b.selected_from AND b.selected_through\n    GROUP BY date_trunc('week', h.day)::date\n)\nSELECT greatest(w.week_start, b.selected_from)::text || ' – ' || least(w.week_start + 6, b.selected_through)::text AS \"Dates\",\n       w.moderate AS \"Moderate\",\n       w.vigorous AS \"Vigorous\"\nFROM weeks AS w\nCROSS JOIN bounds AS b\nORDER BY w.week_start",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "xField": "Dates",
+            "orientation": "vertical",
+            "stacking": "normal",
+            "barWidth": 0.85,
+            "groupWidth": 0.7,
+            "showValue": "never",
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none",
+              "hideZeros": false
+            },
+            "xTickLabelRotation": 0,
+            "fullHighlight": false
+          },
+          "description": "Monday-based weekly totals for the selected dates. The default range covers four completed Monday–Sunday weeks. Dates show the actual selected interval for each row; custom ranges may cover fewer than seven days. Missing measurements are not converted to zero."
+        },
+        {
+          "id": 12,
+          "title": "Daily step distance",
+          "type": "timeseries",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 29,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "#5B8FF9"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "Distance from steps (km)",
+                "axisPlacement": "auto",
+                "drawStyle": "bars",
+                "fillOpacity": 80,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 0,
+                "pointSize": 4,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                },
+                "barAlignment": 1,
+                "barWidthFactor": 0.8
+              },
+              "decimals": 2,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "#5B8FF9"
+                  }
+                ]
+              },
+              "unit": "suffix: km",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "time_series",
+              "rawQuery": true,
+              "rawSql": "SELECT h.day::timestamp AT TIME ZONE ${__timezone:sqlstring} AS \"time\",\n       h.distance_m / 1000.0 AS \"Step distance\"\nFROM daily_health AS h\nWHERE h.day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date)\n  AND h.day < (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date\nORDER BY \"time\" ASC",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": false
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "description": "Distance reported by Garmin for daily steps, converted from metres to kilometres. This is not a GPS track or workout-specific distance."
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "Daily history",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_POSTGRESQL}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "inspect": false,
+                "minWidth": 110
+              },
+              "mappings": []
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Steps (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "gauge",
+                      "mode": "basic",
+                      "valueDisplayMode": "text"
+                    }
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "thresholds"
+                    }
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "unit",
+                    "value": "locale"
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Steps"
+                  },
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "noValue",
+                    "value": "-"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Sleep score (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "gauge",
+                      "mode": "basic",
+                      "valueDisplayMode": "text"
+                    }
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "thresholds"
+                    }
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "#77808C"
+                        },
+                        {
+                          "color": "#5B8FF9",
+                          "value": 80
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Sleep score"
+                  },
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "max",
+                    "value": 100
+                  },
+                  {
+                    "id": "noValue",
+                    "value": "-"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Sleep (s) (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  },
+                  {
+                    "id": "noValue",
+                    "value": "-"
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Sleep"
+                  },
+                  {
+                    "id": "unit",
+                    "value": "clocks"
+                  },
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "type": "value",
+                        "options": {
+                          "0": {
+                            "text": "0 min"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "HRV night (ms) (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "unit",
+                    "value": "ms"
+                  },
+                  {
+                    "id": "noValue",
+                    "value": "-"
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "HRV night"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Resting HR (bpm) (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "unit",
+                    "value": "bpm"
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Resting HR"
+                  },
+                  {
+                    "id": "noValue",
+                    "value": "-"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Avg stress (0–100) (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "Avg stress"
+                  },
+                  {
+                    "id": "noValue",
+                    "value": "-"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "BB peak (0–100) (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "noValue",
+                    "value": "-"
+                  },
+                  {
+                    "id": "displayName",
+                    "value": "BB peak"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "HRV status (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "HRV status"
+                  },
+                  {
+                    "id": "noValue",
+                    "value": "-"
+                  },
+                  {
+                    "id": "custom.filterable",
+                    "value": true
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#A6ADB8"
+                    }
+                  },
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "type": "value",
+                        "options": {
+                          "BALANCED": {
+                            "text": "BALANCED",
+                            "color": "#73BF69",
+                            "index": 0
+                          },
+                          "UNBALANCED": {
+                            "text": "UNBALANCED",
+                            "color": "#E5A53B",
+                            "index": 1
+                          },
+                          "LOW": {
+                            "text": "LOW",
+                            "color": "#D89086",
+                            "index": 2
+                          },
+                          "POOR": {
+                            "text": "POOR",
+                            "color": "#D89086",
+                            "index": 3
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "ISO Day"
+                },
+                "properties": [
+                  {
+                    "id": "displayName",
+                    "value": "Day"
+                  },
+                  {
+                    "id": "noValue",
+                    "value": "-"
+                  },
+                  {
+                    "id": "links",
+                    "value": [
+                      {
+                        "title": "Show surrounding week",
+                        "url": "d/${__dashboard.uid}/?from=${__data.fields[\"Week from (lastNotNull)\"]}&to=${__data.fields[\"Week to (lastNotNull)\"]}&timezone=${__timezone:percentencode}&var-DS_POSTGRESQL=${DS_POSTGRESQL:percentencode}&var-STEP_GOAL=${STEP_GOAL:percentencode}&var-BASELINE_DAYS=${BASELINE_DAYS:percentencode}",
+                        "targetBlank": false
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Week from (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hidden",
+                    "value": true
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Week to (lastNotNull)"
+                },
+                "properties": [
+                  {
+                    "id": "custom.hidden",
+                    "value": true
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 30,
+            "w": 24,
+            "h": 12
+          },
+          "id": 6,
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "show": false
+            },
+            "showHeader": true
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "WITH daily_values AS (\n    SELECT h.day, h.steps, h.distance_m, h.calories_total, h.calories_active, h.calories_resting,\n           h.heart_rate_resting, h.heart_rate_min, h.heart_rate_max,\n           h.moderate_minutes, h.vigorous_minutes, h.stress_avg, h.stress_max,\n           h.respiration_avg AS day_respiration_avg, h.respiration_min, h.respiration_max,\n           h.stress_rest_ms, h.stress_high_ms, weigh_ins.measurements,\n           h.body_battery_min, h.body_battery_latest, h.body_battery_max,\n           h.body_battery_charged, h.body_battery_drained,\n           s.started_at, s.ended_at, s.duration_s, s.nap_s, s.score, s.deep_s, s.light_s, s.rem_s,\n           s.awake_s, s.unmeasurable_s, s.heart_rate_avg, s.stress_avg AS sleep_stress_avg,\n           s.respiration_avg, s.spo2_avg,\n           v.night_avg, v.weekly_avg, v.status, v.baseline_low, v.baseline_high, v.baseline_low_upper\n    FROM daily_health AS h\n    LEFT JOIN daily_sleep AS s ON s.day = h.day\n    LEFT JOIN daily_hrv AS v ON v.day = h.day\n    LEFT JOIN LATERAL (\n        SELECT string_agg(to_char(w.measured_at AT TIME ZONE ${__timezone:sqlstring}, 'HH24:MI') || ' · ' || round(w.weight_kg, 1)::text || ' kg', '; ' ORDER BY w.measured_at) AS measurements\n        FROM weight_measurements w WHERE w.day = h.day\n    ) weigh_ins ON true\n    WHERE h.day BETWEEN (($__timeFrom()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date) AND (($__timeTo()::timestamptz AT TIME ZONE ${__timezone:sqlstring})::date)\n)\nSELECT d.day::text AS \"ISO Day\", d.steps AS \"Steps\", d.duration_s AS \"Sleep (s)\",\n       d.score AS \"Sleep score\", d.night_avg AS \"HRV night (ms)\", d.status AS \"HRV status\",\n       d.heart_rate_resting AS \"Resting HR (bpm)\", d.stress_avg AS \"Avg stress (0–100)\",\n       d.body_battery_max AS \"BB peak (0–100)\",\n       (extract(epoch FROM ((least(d.day + 3, (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date - 1) - 6)::timestamp AT TIME ZONE ${__timezone:sqlstring})) * 1000)::bigint::text AS \"Week from\",\n       (extract(epoch FROM ((least(d.day + 3, (CURRENT_TIMESTAMP AT TIME ZONE ${__timezone:sqlstring})::date - 1) + 1)::timestamp AT TIME ZONE ${__timezone:sqlstring})) * 1000 - 1)::bigint::text AS \"Week to\",\n       metric AS \"Metric\", coalesce(value, '-') AS \"Value\"\nFROM daily_values AS d CROSS JOIN LATERAL (VALUES\n    (1, 'Sleep · Start', to_char(d.started_at AT TIME ZONE ${__timezone:sqlstring}, 'YYYY-MM-DD HH24:MI')),\n    (2, 'Sleep · End', to_char(d.ended_at AT TIME ZONE ${__timezone:sqlstring}, 'YYYY-MM-DD HH24:MI')),\n    (3, 'Sleep · Naps', CASE WHEN d.nap_s IS NOT NULL THEN (floor(d.nap_s / 60.0)::bigint / 60)::text || ' h ' || lpad((floor(d.nap_s / 60.0)::bigint % 60)::text, 2, '0') || ' min' END),\n    (4, 'Sleep · Deep', CASE WHEN d.deep_s IS NOT NULL THEN (floor(d.deep_s / 60.0)::bigint / 60)::text || ' h ' || lpad((floor(d.deep_s / 60.0)::bigint % 60)::text, 2, '0') || ' min' END),\n    (5, 'Sleep · Light', CASE WHEN d.light_s IS NOT NULL THEN (floor(d.light_s / 60.0)::bigint / 60)::text || ' h ' || lpad((floor(d.light_s / 60.0)::bigint % 60)::text, 2, '0') || ' min' END),\n    (6, 'Sleep · REM', CASE WHEN d.rem_s IS NOT NULL THEN (floor(d.rem_s / 60.0)::bigint / 60)::text || ' h ' || lpad((floor(d.rem_s / 60.0)::bigint % 60)::text, 2, '0') || ' min' END),\n    (7, 'Sleep · Awake', CASE WHEN d.awake_s IS NOT NULL THEN (floor(d.awake_s / 60.0)::bigint / 60)::text || ' h ' || lpad((floor(d.awake_s / 60.0)::bigint % 60)::text, 2, '0') || ' min' END),\n    (8, 'Sleep · Unmeasurable', CASE WHEN d.unmeasurable_s IS NOT NULL THEN (floor(d.unmeasurable_s / 60.0)::bigint / 60)::text || ' h ' || lpad((floor(d.unmeasurable_s / 60.0)::bigint % 60)::text, 2, '0') || ' min' END),\n    (9, 'Sleep · Heart rate (bpm)', d.heart_rate_avg::text),\n    (10, 'Sleep · Stress (0–100)', d.sleep_stress_avg::text),\n    (11, 'Sleep · Respiration (/min)', d.respiration_avg::text),\n    (12, 'Sleep · SpO2 (%)', d.spo2_avg::text),\n    (13, 'HRV · Garmin weekly average (ms)', d.weekly_avg::text),\n    (14, 'HRV · Range lower (ms)', d.baseline_low::text),\n    (15, 'HRV · Range upper (ms)', d.baseline_high::text),\n    (16, 'HRV · Low upper boundary (ms)', d.baseline_low_upper::text),\n    (17, 'Body Battery · Last reading (0–100)', d.body_battery_latest::text),\n    (18, 'Body Battery · Minimum (0–100)', d.body_battery_min::text),\n    (19, 'Body Battery · Charged (points)', d.body_battery_charged::text),\n    (20, 'Body Battery · Drained (points)', d.body_battery_drained::text),\n    (21, 'Movement · Step distance (km)', round(d.distance_m / 1000.0, 2)::text),\n    (22, 'Movement · Moderate (min)', d.moderate_minutes::text),\n    (23, 'Movement · Vigorous (min)', d.vigorous_minutes::text),\n    (24, 'Energy · Total (kcal)', d.calories_total::text),\n    (25, 'Energy · Active (kcal)', d.calories_active::text),\n    (26, 'Energy · Resting (kcal)', d.calories_resting::text),\n    (27, 'Heart rate · Minimum (bpm)', d.heart_rate_min::text),\n    (28, 'Heart rate · Maximum (bpm)', d.heart_rate_max::text),\n    (29, 'Stress · Maximum (0–100)', d.stress_max::text),\n    (30, 'Respiration · Day average (/min)', d.day_respiration_avg::text),\n    (31, 'Respiration · Daily range (/min)', CASE WHEN d.respiration_min IS NOT NULL OR d.respiration_max IS NOT NULL THEN coalesce(d.respiration_min::text, '-') || '–' || coalesce(d.respiration_max::text, '-') END),\n    (32, 'Stress · Rest', CASE WHEN (d.stress_rest_ms / 1000.0) IS NULL THEN NULL WHEN (d.stress_rest_ms / 1000.0) = 0 THEN '0 min' WHEN (d.stress_rest_ms / 1000.0) < 60 THEN round(((d.stress_rest_ms / 1000.0))::numeric, 1)::text || ' s' ELSE (floor(((d.stress_rest_ms / 1000.0)) / 60.0)::bigint / 60)::text || ' h ' || lpad((floor(((d.stress_rest_ms / 1000.0)) / 60.0)::bigint % 60)::text, 2, '0') || ' min' END),\n    (33, 'Stress · High', CASE WHEN (d.stress_high_ms / 1000.0) IS NULL THEN NULL WHEN (d.stress_high_ms / 1000.0) = 0 THEN '0 min' WHEN (d.stress_high_ms / 1000.0) < 60 THEN round(((d.stress_high_ms / 1000.0))::numeric, 1)::text || ' s' ELSE (floor(((d.stress_high_ms / 1000.0)) / 60.0)::bigint / 60)::text || ' h ' || lpad((floor(((d.stress_high_ms / 1000.0)) / 60.0)::bigint % 60)::text, 2, '0') || ' min' END),\n    (34, 'Body mass · Weigh-ins', d.measurements)\n) AS metrics(row_order, metric, value)\nORDER BY d.day DESC, row_order",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_POSTGRESQL}"
+              },
+              "editorMode": "code",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "WITH settings AS MATERIALIZED (\n    SELECT CASE WHEN ${STEP_GOAL:sqlstring} ~ '^[1-9][0-9]*$' THEN ${STEP_GOAL:sqlstring}::integer ELSE ('STEP_GOAL must be a positive whole integer: ' || ${STEP_GOAL:sqlstring})::integer END AS step_goal\n)\nSELECT 0 AS \"Minimum\", step_goal AS \"Maximum\",\n       0 AS \"Base\", step_goal AS \"Goal\"\nFROM settings",
+              "refId": "B"
+            }
+          ],
+          "title": "Daily summary",
+          "type": "table",
+          "description": "Expand a date for complementary measurements, grouped by topic without repeating the eight summary metrics. The date link opens a surrounding seven-day view, clamped to yesterday at the recent edge. Today is available only in the table when explicitly selected. Missing values display a dash; zeros remain zeros.",
+          "transformations": [
+            {
+              "id": "groupToNestedTable",
+              "options": {
+                "showSubframeHeaders": true,
+                "expandAllRows": false,
+                "rules": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "ISO Day"
+                    },
+                    "operation": "groupby",
+                    "aggregations": []
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Steps"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Sleep (s)"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Sleep score"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "HRV night (ms)"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "HRV status"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Resting HR (bpm)"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Avg stress (0–100)"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "BB peak (0–100)"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Week from"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Week to"
+                    },
+                    "operation": "aggregate",
+                    "aggregations": [
+                      "lastNotNull"
+                    ]
+                  }
+                ]
+              },
+              "filter": {
+                "id": "byRefId",
+                "options": "A"
+              }
+            },
+            {
+              "id": "configFromData",
+              "options": {
+                "configRefId": "B",
+                "applyTo": {
+                  "id": "byName",
+                  "options": "Steps (lastNotNull)"
+                },
+                "mappings": [
+                  {
+                    "fieldName": "Minimum",
+                    "handlerKey": "min",
+                    "reducerId": "lastNotNull"
+                  },
+                  {
+                    "fieldName": "Maximum",
+                    "handlerKey": "max",
+                    "reducerId": "lastNotNull"
+                  },
+                  {
+                    "fieldName": "Base",
+                    "handlerKey": "threshold1",
+                    "reducerId": "lastNotNull",
+                    "handlerArguments": {
+                      "threshold": {
+                        "color": "#77808C"
+                      }
+                    }
+                  },
+                  {
+                    "fieldName": "Goal",
+                    "handlerKey": "threshold1",
+                    "reducerId": "lastNotNull",
+                    "handlerArguments": {
+                      "threshold": {
+                        "color": "#73BF69"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "filterFieldsByName",
+              "options": {
+                "exclude": {
+                  "names": [
+                    "Minimum",
+                    "Maximum",
+                    "Base",
+                    "Goal"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "preload": false,
+  "schemaVersion": 41,
+  "tags": [
+    "garmin",
+    "health"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_POSTGRESQL",
+        "label": "PostgreSQL",
+        "description": "Select the PostgreSQL data source containing your Garmin Daily data.",
+        "type": "datasource",
+        "query": "grafana-postgresql-datasource",
+        "current": {},
+        "options": [],
+        "refresh": 1,
+        "hide": 0,
+        "multi": false,
+        "includeAll": false
+      },
+      {
+        "name": "STEP_GOAL",
+        "label": "Step goal",
+        "description": "Daily step target. Used for the goal line and bar colors in the steps chart, and for the gauge in Daily summary. Use a positive whole number.",
+        "type": "textbox",
+        "query": "10000",
+        "current": {
+          "text": "10000",
+          "value": "10000"
+        },
+        "options": [
+          {
+            "text": "10000",
+            "value": "10000",
+            "selected": true
+          }
+        ],
+        "hide": 0
+      },
+      {
+        "name": "BASELINE_DAYS",
+        "label": "Reference days",
+        "description": "Number of previous calendar days used to calculate your personal reference range for resting heart rate, sleep heart rate and sleep respiration. Does not change Garmin's HRV status. Use a positive whole number. If any required reading is missing, the reference range is unavailable.",
+        "type": "textbox",
+        "query": "28",
+        "current": {
+          "text": "28",
+          "value": "28"
+        },
+        "options": [
+          {
+            "text": "28",
+            "value": "28",
+            "selected": true
+          }
+        ],
+        "hide": 0
+      }
+    ]
+  },
+  "time": {
+    "from": "now-4w/w",
+    "to": "now-1w/w"
+  },
+  "timepicker": {
+    "quick_ranges": [
+      {
+        "display": "Last 4 complete weeks (Mon–Sun)",
+        "from": "now-4w/w",
+        "to": "now-1w/w"
+      },
+      {
+        "display": "Last 7 completed Garmin days",
+        "from": "now-7d/d",
+        "to": "now-1d/d"
+      },
+      {
+        "display": "Last 14 completed Garmin days",
+        "from": "now-14d/d",
+        "to": "now-1d/d"
+      },
+      {
+        "display": "Last 30 completed Garmin days",
+        "from": "now-30d/d",
+        "to": "now-1d/d"
+      },
+      {
+        "display": "Last 90 completed Garmin days",
+        "from": "now-90d/d",
+        "to": "now-1d/d"
+      },
+      {
+        "display": "14 completed days + latest night/details",
+        "from": "now-14d/d",
+        "to": "now"
+      }
+    ],
+    "refresh_intervals": []
+  },
+  "timezone": "browser",
+  "title": "Garmin Daily",
+  "uid": "garmin-daily",
+  "version": 1,
+  "weekStart": "monday"
+}

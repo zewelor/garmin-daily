@@ -89,10 +89,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 	}
 	var conn *pgx.Conn
 	if !dryRun {
+		// An empty DSN lets pgx use the standard PG* environment variables.
 		dsn := getenv("DATABASE_URL")
-		if strings.TrimSpace(dsn) == "" {
-			return fmt.Errorf("DATABASE_URL is required")
-		}
 		connectCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		var err error
 		conn, err = pgx.Connect(connectCtx, dsn)
