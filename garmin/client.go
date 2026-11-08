@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -36,6 +37,10 @@ func NewClient(baseURL string, httpClient *http.Client) *Client {
 }
 
 func (c *Client) request(ctx context.Context, method, path, auth string) ([]byte, int, error) {
+	operation := "data"
+	if method == http.MethodPost {
+		operation = "authentication"
+	}
 	for attempt := 0; attempt < 3; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, nil)
 		if err != nil {
@@ -62,13 +67,19 @@ func (c *Client) request(ctx context.Context, method, path, auth string) ([]byte
 			return body, resp.StatusCode, nil
 		}
 		if attempt == 2 || (resp.StatusCode != 429 && resp.StatusCode < 500) {
+			if attempt == 2 && (resp.StatusCode == 429 || resp.StatusCode >= 500) {
+				log.Printf("Garmin retry: operation=%s http_status=%d attempt=%d decision=attempt_limit", operation, resp.StatusCode, attempt+1)
+			}
 			return nil, resp.StatusCode, fmt.Errorf("Garmin HTTP %d", resp.StatusCode)
 		}
 		delay := time.Duration(attempt+1) * time.Second
+		retryAfter := "absent"
 		if h := resp.Header.Get("Retry-After"); h != "" {
 			if seconds, err := strconv.Atoi(h); err == nil && seconds >= 0 {
+				retryAfter = fmt.Sprintf("%ds", seconds)
 				if seconds > 30 {
-					return nil, resp.StatusCode, fmt.Errorf("Garmin Retry-After exceeds 30s; rerun later")
+					log.Printf("Garmin retry: operation=%s http_status=%d attempt=%d retry_after=%s decision=limit_exceeded", operation, resp.StatusCode, attempt+1, retryAfter)
+					return nil, resp.StatusCode, fmt.Errorf("Garmin HTTP %d: Retry-After %s exceeds 30s; rerun later", resp.StatusCode, retryAfter)
 				}
 				delay = time.Duration(seconds) * time.Second
 			} else if when, err := http.ParseTime(h); err == nil {
@@ -76,13 +87,16 @@ func (c *Client) request(ctx context.Context, method, path, auth string) ([]byte
 				if delay < 0 {
 					delay = 0
 				}
+				retryAfter = delay.String()
 			} else {
-				return nil, resp.StatusCode, fmt.Errorf("invalid Garmin Retry-After")
+				return nil, resp.StatusCode, fmt.Errorf("invalid Garmin Retry-After: HTTP %d attempt=%d", resp.StatusCode, attempt+1)
 			}
 		}
 		if delay > 30*time.Second {
-			return nil, resp.StatusCode, fmt.Errorf("Garmin HTTP %d: Retry-After exceeds 30s; rerun later", resp.StatusCode)
+			log.Printf("Garmin retry: operation=%s http_status=%d attempt=%d retry_after=%s decision=limit_exceeded", operation, resp.StatusCode, attempt+1, retryAfter)
+			return nil, resp.StatusCode, fmt.Errorf("Garmin HTTP %d: Retry-After %s exceeds 30s; rerun later", resp.StatusCode, retryAfter)
 		}
+		log.Printf("Garmin retry: operation=%s http_status=%d attempt=%d retry_after=%s delay=%s decision=wait", operation, resp.StatusCode, attempt+1, retryAfter, delay)
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
