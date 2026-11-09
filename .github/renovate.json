@@ -5,6 +5,18 @@
   "platformAutomerge": false,
   "packageRules": [
     {
+      "description": "Group Go versions in the module and build image",
+      "matchDepNames": ["go", "golang"],
+      "groupName": "Go toolchain"
+    },
+    {
+      "description": "Keep the Go module directive up to date",
+      "matchManagers": ["gomod"],
+      "matchDepNames": ["go"],
+      "matchDepTypes": ["golang"],
+      "rangeStrategy": "bump"
+    },
+    {
       "description": "Automerge non-major Go module and toolchain updates",
       "matchManagers": ["gomod"],
       "matchUpdateTypes": ["minor", "patch", "digest"],
