@@ -66,7 +66,7 @@ func TestRetryDiagnostics(t *testing.T) {
 				fmt.Fprint(w, token)
 				return
 			}
-			w.Header().Set("Retry-After", "31")
+			w.Header().Set("Retry-After", "121")
 			w.WriteHeader(429)
 			fmt.Fprint(w, body)
 		}))
@@ -79,13 +79,13 @@ func TestRetryDiagnostics(t *testing.T) {
 		if err == nil || calls != 2 {
 			t.Fatalf("calls=%d err=%v", calls, err)
 		}
-		require(t, logs.String()+err.Error(), "operation=data", "http_status=429", "attempt=1", "retry_after=31s", "decision=limit_exceeded")
+		require(t, logs.String()+err.Error(), "operation=data", "http_status=429", "attempt=1", "retry_after=121s", "decision=limit_exceeded")
 	})
 
 	t.Run("HTTP date", func(t *testing.T) {
 		logs.Reset()
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Retry-After", time.Now().Add(60*time.Second).UTC().Format(http.TimeFormat))
+			w.Header().Set("Retry-After", time.Now().Add(180*time.Second).UTC().Format(http.TimeFormat))
 			w.WriteHeader(503)
 		}))
 		defer s.Close()
@@ -99,7 +99,7 @@ func TestRetryDiagnostics(t *testing.T) {
 			t.Fatalf("missing computed delay: %s", logs.String())
 		}
 		delay, parseErr := time.ParseDuration(match[1])
-		if parseErr != nil || delay < 50*time.Second || delay > 60*time.Second {
+		if parseErr != nil || delay < 170*time.Second || delay > 180*time.Second {
 			t.Errorf("computed delay=%q err=%v", match[1], parseErr)
 		}
 	})

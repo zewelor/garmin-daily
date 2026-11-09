@@ -196,10 +196,12 @@ values fail instead of being clipped or changed to zero.
 
 Garmin HTTP requests have a 20-second timeout and an 8 MiB response limit.
 HTTP 429 and 5xx responses are retried up to three attempts, respecting
-`Retry-After` up to 30 seconds; a longer delay fails the run. HTTP 401, other
+`Retry-After` up to the per-retry delay limit, which defaults to 2 minutes and can
+be set with `GARMIN_RETRY_MAX_WAIT` (for example, `150s`). A longer delay fails
+the run. The limit applies separately to each retry and each request. HTTP 401, other
 HTTP errors, network failures, and timeouts are not retried. Retry diagnostics on
 stderr identify authentication or data retrieval, HTTP status, attempt number,
-and the decision to wait, stop at the 30-second limit, or stop at the attempt
+and the decision to wait, stop at the configured delay limit, or stop at the attempt
 limit. When considered, a valid `Retry-After` is shown as a duration, including
 the computed wait for an HTTP date. An absent header is marked `absent` and the
 default delay is shown; an invalid header fails without logging its value. On the

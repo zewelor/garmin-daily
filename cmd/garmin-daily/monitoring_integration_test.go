@@ -35,10 +35,13 @@ func TestIntegrationDryRunMatchesDatabaseRows(t *testing.T) {
 	dsn.RawQuery = query.Encode()
 	installPreviewHTTP(t)
 	getenv := func(name string) string {
-		if name == "DATABASE_URL" {
+		switch name {
+		case "DATABASE_URL":
 			return dsn.String()
+		case "GARMIN_API_KEY":
+			return "synthetic-key"
 		}
-		return "synthetic-key"
+		return ""
 	}
 	args := []string{"sync", "--from", "2026-11-02", "--to", "2026-11-02"}
 	var preview bytes.Buffer

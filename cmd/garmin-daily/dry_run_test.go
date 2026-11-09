@@ -83,6 +83,9 @@ func TestDryRunPrintsIncomingDatabaseRows(t *testing.T) {
 		if name == "GARMIN_API_KEY" {
 			return "synthetic-key"
 		}
+		if name == "GARMIN_RETRY_MAX_WAIT" {
+			return ""
+		}
 		t.Fatalf("dry run read database configuration %s", name)
 		return ""
 	}, &out)
@@ -140,7 +143,12 @@ func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
 func TestDryRunOutputErrorRemainsAnOutputError(t *testing.T) {
 	installPreviewHTTP(t)
 	failure := errors.New("disk write failed")
-	err := run(context.Background(), []string{"sync", "--dry-run", "--from", "2026-11-02", "--to", "2026-11-02"}, func(string) string { return "synthetic-key" }, failingWriter{failure})
+	err := run(context.Background(), []string{"sync", "--dry-run", "--from", "2026-11-02", "--to", "2026-11-02"}, func(name string) string {
+		if name == "GARMIN_API_KEY" {
+			return "synthetic-key"
+		}
+		return ""
+	}, failingWriter{failure})
 	if !errors.Is(err, failure) || !strings.Contains(err.Error(), "write dry-run output") || strings.Contains(err.Error(), "network") {
 		t.Fatalf("output error lost or misclassified: %v", err)
 	}
@@ -150,6 +158,9 @@ func TestActivityOnlyDryRunHasTheSameScope(t *testing.T) {
 	requests := installPreviewHTTP(t)
 	var out bytes.Buffer
 	if err := run(context.Background(), []string{"sync-activities", "--dry-run", "--from", "2026-11-02", "--to", "2026-11-02"}, func(name string) string {
+		if name == "GARMIN_RETRY_MAX_WAIT" {
+			return ""
+		}
 		if name != "GARMIN_API_KEY" {
 			t.Fatalf("unexpected configuration %s", name)
 		}

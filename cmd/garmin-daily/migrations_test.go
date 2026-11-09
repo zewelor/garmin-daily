@@ -41,10 +41,13 @@ func TestIntegrationMigrateRejectsOlderPostgreSQL(t *testing.T) {
 			args = append(args, "--from", "2026-11-02", "--to", "2026-11-02")
 		}
 		err := run(ctx, args, func(name string) string {
-			if name == "DATABASE_URL" {
+			switch name {
+			case "DATABASE_URL":
 				return databaseURL.String()
+			case "GARMIN_API_KEY":
+				return "synthetic-key"
 			}
-			return "synthetic-key"
+			return ""
 		}, io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "PostgreSQL 18 or newer is required") {
 			t.Fatalf("%s: expected minimum-version error, got %v", command, err)

@@ -12,6 +12,7 @@ process manager to supply it.
 | --- | --- | --- |
 | `DATABASE_URL` | Optional | Complete or partial database connection settings. Omit it when using only `PG*`. |
 | `GARMIN_API_KEY` | `sync`, `sync-activities` | Garmin Connect Personal API key. |
+| `GARMIN_RETRY_MAX_WAIT` | Optional | Maximum delay per Garmin retry, as a duration such as `2m` or `150s`. Defaults to `2m`; must be positive. |
 | `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD` | Optional | Supply connection fields omitted from `DATABASE_URL`; useful for separate host and credential secrets. |
 | `PGDATABASE`, `PGSSLMODE` | Optional | Supply the database or TLS mode when not explicitly set in `DATABASE_URL`. |
 

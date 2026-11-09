@@ -87,6 +87,16 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 	if syncCommand && key == "" {
 		return fmt.Errorf("GARMIN_API_KEY is required")
 	}
+	retryMaxWait := garmin.DefaultRetryMaxWait
+	if syncCommand {
+		if value := getenv("GARMIN_RETRY_MAX_WAIT"); value != "" {
+			var err error
+			retryMaxWait, err = time.ParseDuration(value)
+			if err != nil || retryMaxWait <= 0 {
+				return fmt.Errorf("GARMIN_RETRY_MAX_WAIT must be a positive duration, e.g. 2m")
+			}
+		}
+	}
 	var conn *pgx.Conn
 	if !dryRun {
 		// An empty DSN lets pgx use the standard PG* environment variables.
@@ -108,6 +118,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, out io.
 	}
 	httpClient := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	c := garmin.NewClient(garmin.BaseURL, httpClient)
+	c.RetryMaxWait = retryMaxWait
 	if err := c.Authenticate(ctx, key); err != nil {
 		return fmt.Errorf("authentication: %w", err)
 	}

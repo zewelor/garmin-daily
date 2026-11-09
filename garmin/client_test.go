@@ -2,6 +2,7 @@ package garmin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,57 @@ import (
 	"testing"
 	"time"
 )
+
+func TestDefaultRetryWaitAcceptsTwoMinutes(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusGatewayTimeout)
+	}))
+	defer s.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := NewClient(s.URL, s.Client()).Authenticate(ctx, "key")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected to wait until cancellation, got %v", err)
+	}
+}
+
+func TestConfiguredRetryWait(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header string
+		limit  time.Duration
+		wait   bool
+	}{
+		{"accept at limit", "2", 2 * time.Second, true},
+		{"reject above limit", "2", time.Second, false},
+		{"reject date above limit", time.Now().Add(3 * time.Minute).UTC().Format(http.TimeFormat), time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Retry-After", tc.header)
+				w.WriteHeader(http.StatusGatewayTimeout)
+			}))
+			defer s.Close()
+			c := NewClient(s.URL, s.Client())
+			c.RetryMaxWait = tc.limit
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			err := c.Authenticate(ctx, "key")
+			if tc.wait && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("expected to wait until cancellation, got %v", err)
+			}
+			if !tc.wait && (err == nil || !strings.Contains(err.Error(), "exceeds "+tc.limit.String())) {
+				t.Fatalf("expected configured limit error, got %v", err)
+			}
+			if calls != 1 {
+				t.Fatalf("calls=%d, want 1", calls)
+			}
+		})
+	}
+}
 
 func TestHTTPFailures(t *testing.T) {
 	for _, status := range []int{401, 404, 429, 500} {

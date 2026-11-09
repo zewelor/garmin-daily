@@ -16,6 +16,9 @@ import (
 
 // BaseURL is the official Garmin Connect Personal API host.
 const BaseURL = "https://personal.connectapi.garmin.com"
+
+// DefaultRetryMaxWait is the maximum delay before an individual retry.
+const DefaultRetryMaxWait = 2 * time.Minute
 const (
 	tokenPath   = "/personalapitoken-service/personal-api/personal-api-key/token"
 	summaryPath = "/usersummary-service/v2/dailysummaries"
@@ -29,11 +32,13 @@ type Client struct {
 	baseURL string
 	http    *http.Client
 	token   string
+	// RetryMaxWait limits each retry delay, including Retry-After.
+	RetryMaxWait time.Duration
 }
 
 // NewClient uses the supplied API host and non-nil HTTP client.
 func NewClient(baseURL string, httpClient *http.Client) *Client {
-	return &Client{baseURL: baseURL, http: httpClient}
+	return &Client{baseURL: baseURL, http: httpClient, RetryMaxWait: DefaultRetryMaxWait}
 }
 
 func (c *Client) request(ctx context.Context, method, path, auth string) ([]byte, int, error) {
@@ -77,9 +82,9 @@ func (c *Client) request(ctx context.Context, method, path, auth string) ([]byte
 		if h := resp.Header.Get("Retry-After"); h != "" {
 			if seconds, err := strconv.Atoi(h); err == nil && seconds >= 0 {
 				retryAfter = fmt.Sprintf("%ds", seconds)
-				if seconds > 30 {
+				if int64(seconds) > int64(c.RetryMaxWait/time.Second) {
 					log.Printf("Garmin retry: operation=%s http_status=%d attempt=%d retry_after=%s decision=limit_exceeded", operation, resp.StatusCode, attempt+1, retryAfter)
-					return nil, resp.StatusCode, fmt.Errorf("Garmin HTTP %d: Retry-After %s exceeds 30s; rerun later", resp.StatusCode, retryAfter)
+					return nil, resp.StatusCode, fmt.Errorf("Garmin HTTP %d: Retry-After %s exceeds %s; rerun later", resp.StatusCode, retryAfter, c.RetryMaxWait)
 				}
 				delay = time.Duration(seconds) * time.Second
 			} else if when, err := http.ParseTime(h); err == nil {
@@ -92,9 +97,9 @@ func (c *Client) request(ctx context.Context, method, path, auth string) ([]byte
 				return nil, resp.StatusCode, fmt.Errorf("invalid Garmin Retry-After: HTTP %d attempt=%d", resp.StatusCode, attempt+1)
 			}
 		}
-		if delay > 30*time.Second {
+		if delay > c.RetryMaxWait {
 			log.Printf("Garmin retry: operation=%s http_status=%d attempt=%d retry_after=%s decision=limit_exceeded", operation, resp.StatusCode, attempt+1, retryAfter)
-			return nil, resp.StatusCode, fmt.Errorf("Garmin HTTP %d: Retry-After %s exceeds 30s; rerun later", resp.StatusCode, retryAfter)
+			return nil, resp.StatusCode, fmt.Errorf("Garmin HTTP %d: retry delay %s exceeds %s; rerun later", resp.StatusCode, delay, c.RetryMaxWait)
 		}
 		log.Printf("Garmin retry: operation=%s http_status=%d attempt=%d retry_after=%s delay=%s decision=wait", operation, resp.StatusCode, attempt+1, retryAfter, delay)
 		timer := time.NewTimer(delay)
