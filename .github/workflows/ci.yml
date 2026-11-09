@@ -33,6 +33,8 @@ jobs:
         uses: immanuwell/dockerfile-roast@1c87b2aa189338c24db4acde40864dae8994de8f # 1.7.0
         with:
           no-roast: true
+          # The collector is a CLI job and does not listen on a port.
+          skip: DF022
           # Keep the tool image revision in sync with the pinned action release.
           image-tag: 1.7.0@sha256:4f31be49f26804c0a2f8a0ab0ae578719e30376323e8fd5951c6dcc79a478b40
 
