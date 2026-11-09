@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// The three SQL files are the immutable source for migration versions 1-3.
+// The SQL files are the immutable source for their numbered migrations.
 //
 //go:embed schema.sql
 var schemaSQL string
@@ -21,6 +21,9 @@ var activitySchemaSQL string
 
 //go:embed monitoring_schema.sql
 var monitoringSchemaSQL string
+
+//go:embed weight_delta_schema.sql
+var weightDeltaSchemaSQL string
 
 const migrationMetadataSQL = `CREATE TABLE schema_migrations (
 	version integer PRIMARY KEY,
@@ -44,6 +47,7 @@ var migrations = [...]migration{
 	{name: "daily", sql: schemaSQL, applicationFingerprint: "270f3b9fb037f74c7a4828e323330bf2c2f95a0f27af9d4584a8b4d36df2b484"},
 	{name: "activities", sql: activitySchemaSQL, applicationFingerprint: "e08c0b638510148042b9c5d47aabe84026bc135558a1c0362f4365875bf85555"},
 	{name: "monitoring", sql: monitoringSchemaSQL, applicationFingerprint: "dbb2491eda8704b5c5b86628fec3500876f84a671f14baea346fdd9929354a95"},
+	{name: "weight_delta", sql: weightDeltaSchemaSQL, applicationFingerprint: "c8f440eee413fe4d254d472b8720789ffe888c5d28ce18a68405f89cd6fe7aa9"},
 }
 
 var applicationTables = []string{

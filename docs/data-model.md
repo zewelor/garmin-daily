@@ -4,7 +4,8 @@ This reference describes the PostgreSQL rows written by `garmin-daily`. See the
 [README](../README.md) for setup and operation, and the
 [daily SQL schema](../cmd/garmin-daily/schema.sql) and
 [activity SQL schema](../cmd/garmin-daily/activity_schema.sql) and
-[monitoring migration](../cmd/garmin-daily/monitoring_schema.sql) for the exact DDL.
+[monitoring migration](../cmd/garmin-daily/monitoring_schema.sql), and
+[weight delta migration](../cmd/garmin-daily/weight_delta_schema.sql) for the exact DDL.
 
 The [dry-run reference](dry-run.md) describes how to preview these rows.
 Zone settings, body composition, daily SpO₂ and VO₂max are not modeled or stored.
@@ -124,11 +125,25 @@ Nested field paths include their full parent path.
 | `weight_measurements.measured_at` | `timestampGMT` | epoch milliseconds converted to a UTC instant |
 | `weight_measurements.day` | `calendarDate` | Garmin local calendar date, not derived from the UTC timestamp |
 | `weight_measurements.weight_kg` | `weight` | source grams divided by 1000, preserving decimal precision |
+| `weight_measurements.weight_delta` | `weightDelta` | signed source value, unchanged; unit not independently verified |
 
 The live weight unit was checked against a manually entered account value;
-Swagger incorrectly labels it as kg. Local `date`, signed `weightDelta`, BMI
-and body composition are ignored. Missing required measurement time
-or mass, an out-of-range date, or duplicate timestamps abort the weight batch.
+Swagger incorrectly labels it as kg. BMI and body composition are ignored.
+
+Garmin's `date` is also omitted: observed values encode local wall time, not a
+UTC instant (Madeira samples differed from `timestampGMT` by 0 or +1 hour).
+We retain `timestampGMT` for the instant and `calendarDate` for Garmin's day.
+Reconsider `date` if the original local clock time must survive travel or a
+change in display timezone; the timestamp alone does not identify that timezone.
+
+Missing required measurement time or mass, or an out-of-range date, aborts the
+weight batch. Entries sharing a timestamp
+must have the same calendar date. Weight and weight delta are merged separately:
+equal values are combined; if some are zero and the others have one identical
+nonzero value, that nonzero value is used. Missing delta values are combined
+with present values; a group with only missing deltas stays `NULL`. Different
+nonzero values or dates abort the batch. A single zero, or a group containing
+only zero values, remains zero.
 
 Garmin's Personal API schema does not assign a unit to the HRV fields. The
 importer stores them unchanged and does not convert or infer a unit. Confirm
@@ -154,8 +169,9 @@ values fail instead of being clipped or changed to zero.
 
 ## Missing data, validation, and writes
 
-- A missing JSON field or JSON `null` becomes SQL `NULL`, replacing any earlier
-  value on the next import. Numeric zero remains zero.
+- An optional missing JSON field or JSON `null` becomes SQL `NULL`, replacing any
+  earlier value on the next import. Numeric zero remains zero, except when
+  combining duplicate weight entries as described above.
 - HTTP 204 for the sleep or HRV endpoint means all measurement columns in that
   table are `NULL` for the health-summary date.
 - A sleep response with explicit `calendarDate: null` is accepted only when

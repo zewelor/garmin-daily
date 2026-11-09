@@ -15,12 +15,15 @@ Stdout contains JSON Lines. Each incoming row has a `table` and `values` object
 using the exact PostgreSQL column names and normalized values:
 
 ```json
-{"table":"weight_measurements","values":{"day":"2026-10-28","measured_at":"2026-10-28T08:00:00Z","weight_kg":82.3456}}
+{"table":"weight_measurements","values":{"day":"2026-10-28","measured_at":"2026-10-28T08:00:00Z","weight_delta":-900,"weight_kg":82.3456}}
 ```
 
 Dates are `YYYY-MM-DD`; timestamps are UTC instants. Decimal values retain source
-precision without conversion through `float64`. Missing measurements are `null`;
-reported zero remains zero. Fields and units are listed in the [data model](data-model.md).
+precision without conversion through `float64`. Missing optional measurements
+are `null`. Reported zero remains zero, except when combining compatible weight
+entries sharing a timestamp: if a group contains both zero and one nonzero
+weight or weight delta, it prints the nonzero one. Fields and units are listed in the
+[data model](data-model.md).
 
 For every activity, a `delete` object also describes the exercise snapshot
 cleanup performed after its upserts. For example:
@@ -36,6 +39,8 @@ absent from the API response do not imply deletion.
 Weight is printed as `weight_kg`. Although Swagger labels the source `weight`
 as kg, a controlled live check against the account holder's entered value
 confirmed grams. Both modes divide by 1000 using exact decimal arithmetic.
+`weight_delta` retains Garmin's signed source value; its unit has not been
+independently verified.
 BMI, body composition, current zone configuration and other unpersisted fields
 are ignored. Activity zone durations are stored in seconds; daily moderate and
 vigorous minutes remain separate, without doubling vigorous minutes.

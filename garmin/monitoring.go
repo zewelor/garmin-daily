@@ -14,9 +14,10 @@ import (
 // WeightMeasurement contains the source fields persisted by the application.
 // Garmin returns weight in grams and timestamps in epoch milliseconds.
 type WeightMeasurement struct {
-	Day       string       `json:"calendarDate"`
-	Timestamp *EpochMillis `json:"timestampGMT"`
-	Weight    *json.Number `json:"weight"`
+	Day         string       `json:"calendarDate"`
+	Timestamp   *EpochMillis `json:"timestampGMT"`
+	Weight      *json.Number `json:"weight"`
+	WeightDelta *json.Number `json:"weightDelta"`
 }
 
 // Activity is a recorded session, including child sessions of multisport events.

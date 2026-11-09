@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -26,29 +28,84 @@ func weightKilograms(w garmin.WeightMeasurement) (pgtype.Numeric, error) {
 	return value, nil
 }
 
-func validateWeights(weights []garmin.WeightMeasurement, from, to string) error {
-	if !validDay(from) || !validDay(to) || from > to {
-		return fmt.Errorf("invalid weight date range")
+func weightDeltaNumber(delta *json.Number) (pgtype.Numeric, error) {
+	var value pgtype.Numeric
+	if delta == nil {
+		return value, nil
 	}
-	seen := make(map[int64]bool)
+	if err := value.ScanScientific(delta.String()); err != nil || !value.Valid || value.NaN || value.InfinityModifier != pgtype.Finite || value.Int == nil || value.Exp < -math.MaxInt16 {
+		return pgtype.Numeric{}, fmt.Errorf("invalid weight delta")
+	}
+	return value, nil
+}
+
+// A missing value is distinct from zero; among present values, prefer a
+// nonzero value and reject incompatible nonzero values.
+func mergeWeightValue(a, b *json.Number) (*json.Number, error) {
+	if a == nil {
+		return b, nil
+	}
+	if b == nil {
+		return a, nil
+	}
+	first, ok := new(big.Rat).SetString(a.String())
+	if !ok {
+		return nil, fmt.Errorf("invalid weight value")
+	}
+	second, ok := new(big.Rat).SetString(b.String())
+	if !ok {
+		return nil, fmt.Errorf("invalid weight value")
+	}
+	if first.Sign() == 0 {
+		return b, nil
+	}
+	if second.Sign() == 0 || first.Cmp(second) == 0 {
+		return a, nil
+	}
+	return nil, fmt.Errorf("conflicting weight measurements for timestamp")
+}
+
+func normalizeWeights(weights []garmin.WeightMeasurement, from, to string) ([]garmin.WeightMeasurement, error) {
+	if !validDay(from) || !validDay(to) || from > to {
+		return nil, fmt.Errorf("invalid weight date range")
+	}
+	seen := make(map[int64]int)
+	var result []garmin.WeightMeasurement
 	for _, w := range weights {
 		if !validDay(w.Day) || w.Day < from || w.Day > to || w.Timestamp == nil ||
 			w.Timestamp.UnixMilli() < 0 || w.Timestamp.UnixMilli() > 253402300799999 {
-			return fmt.Errorf("invalid weight date or timestamp")
+			return nil, fmt.Errorf("invalid weight date or timestamp")
 		}
-		if seen[w.Timestamp.UnixMilli()] {
-			return fmt.Errorf("duplicate weight timestamp")
-		}
-		seen[w.Timestamp.UnixMilli()] = true
 		if _, err := weightKilograms(w); err != nil {
-			return err
+			return nil, err
 		}
+		if _, err := weightDeltaNumber(w.WeightDelta); err != nil {
+			return nil, err
+		}
+		if i, exists := seen[w.Timestamp.UnixMilli()]; exists {
+			if result[i].Day != w.Day {
+				return nil, fmt.Errorf("conflicting weight measurements for timestamp")
+			}
+			var err error
+			result[i].Weight, err = mergeWeightValue(result[i].Weight, w.Weight)
+			if err != nil {
+				return nil, err
+			}
+			result[i].WeightDelta, err = mergeWeightValue(result[i].WeightDelta, w.WeightDelta)
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
+		seen[w.Timestamp.UnixMilli()] = len(result)
+		result = append(result, w)
 	}
-	return nil
+	return result, nil
 }
 
 func saveWeights(ctx context.Context, conn *pgx.Conn, weights []garmin.WeightMeasurement, from, to string) (int64, error) {
-	if err := validateWeights(weights, from, to); err != nil {
+	weights, err := normalizeWeights(weights, from, to)
+	if err != nil {
 		return 0, err
 	}
 	if len(weights) == 0 {
@@ -57,7 +114,7 @@ func saveWeights(ctx context.Context, conn *pgx.Conn, weights []garmin.WeightMea
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	var changed int64
-	err := pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
+	err = pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
 		for _, w := range weights {
 			r, err := weightRow(w)
 			if err != nil {
@@ -82,9 +139,13 @@ func weightRow(w garmin.WeightMeasurement) (row, error) {
 	if err != nil {
 		return row{}, err
 	}
+	delta, err := weightDeltaNumber(w.WeightDelta)
+	if err != nil {
+		return row{}, err
+	}
 	day, _ := time.Parse(time.DateOnly, w.Day)
-	return row{"weight_measurements", "measured_at", "measured_at day weight_kg", []any{
-		w.Timestamp.Time, pgtype.Date{Time: day, Valid: true}, kg,
+	return row{"weight_measurements", "measured_at", "measured_at day weight_kg weight_delta", []any{
+		w.Timestamp.Time, pgtype.Date{Time: day, Valid: true}, kg, delta,
 	}}, nil
 }
 
@@ -94,7 +155,8 @@ func syncWeightsRange(ctx context.Context, c *garmin.Client, conn *pgx.Conn, fro
 	if err != nil {
 		return fmt.Errorf("weight fetch: %w", err)
 	}
-	if err := validateWeights(weights, fromDate, toDate); err != nil {
+	weights, err = normalizeWeights(weights, fromDate, toDate)
+	if err != nil {
 		return err
 	}
 	if dryRun {

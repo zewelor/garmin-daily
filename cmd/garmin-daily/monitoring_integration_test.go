@@ -239,6 +239,22 @@ func TestIntegrationWeightMeasurementsUpsertAndRetention(t *testing.T) {
 	if err := conn.QueryRow(ctx, `SELECT weight_kg::text FROM weight_measurements WHERE measured_at=$1`, first.Timestamp.Time).Scan(&firstKg); err != nil || firstKg != "81" {
 		t.Fatalf("corrected weight=%q err=%v", firstKg, err)
 	}
+	corrected.WeightDelta = activityNumber("-12.0000000000057")
+	if changed, err := saveWeights(ctx, conn, []garmin.WeightMeasurement{corrected}, day, day); err != nil || changed != 1 {
+		t.Fatalf("delta update changed=%d err=%v", changed, err)
+	}
+	var delta string
+	if err := conn.QueryRow(ctx, `SELECT weight_delta::text FROM weight_measurements WHERE measured_at=$1`, first.Timestamp.Time).Scan(&delta); err != nil || delta != "-12.0000000000057" {
+		t.Fatalf("stored delta=%q err=%v", delta, err)
+	}
+	corrected.WeightDelta = nil
+	if changed, err := saveWeights(ctx, conn, []garmin.WeightMeasurement{corrected}, day, day); err != nil || changed != 1 {
+		t.Fatalf("missing delta update changed=%d err=%v", changed, err)
+	}
+	var deltaMissing bool
+	if err := conn.QueryRow(ctx, `SELECT weight_delta IS NULL FROM weight_measurements WHERE measured_at=$1`, first.Timestamp.Time).Scan(&deltaMissing); err != nil || !deltaMissing {
+		t.Fatalf("missing delta was not persisted: is_null=%v err=%v", deltaMissing, err)
+	}
 	if changed, err := saveWeights(ctx, conn, nil, day, day); err != nil || changed != 0 {
 		t.Fatalf("empty weight response changed=%d err=%v", changed, err)
 	}
@@ -285,6 +301,16 @@ func TestIntegrationWeightValidationRejectsWholeBatch(t *testing.T) {
 	var count int
 	if err := conn.QueryRow(ctx, "SELECT count(*) FROM weight_measurements").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("duplicate timestamps partially wrote weights: count=%d err=%v", count, err)
+	}
+	withDelta := valid
+	withDelta.WeightDelta = activityNumber("-100")
+	conflictingDelta := valid
+	conflictingDelta.WeightDelta = activityNumber("200")
+	if changed, err := saveWeights(ctx, conn, []garmin.WeightMeasurement{withDelta, conflictingDelta}, day, day); err == nil || changed != 0 {
+		t.Fatalf("conflicting deltas changed=%d err=%v", changed, err)
+	}
+	if err := conn.QueryRow(ctx, "SELECT count(*) FROM weight_measurements").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("conflicting deltas partially wrote weights: count=%d err=%v", count, err)
 	}
 }
 
@@ -348,10 +374,7 @@ func TestIntegrationSyncMonitoringEndToEnd(t *testing.T) {
 			}
 			fmt.Fprint(w, `[{"activityId":123,"activityType":{"typeKey":"running"},"startTimeLocal":"2026-10-28 00:15:00","startTimeGMT":"2026-10-27 23:15:00","hrTimeInZone_2":2.25}]`)
 		case "/weight-service/weight/all/2026-10-27/2026-10-28":
-			json.NewEncoder(w).Encode([]garmin.WeightMeasurement{
-				monitoringTestWeight("2026-10-28", time.Date(2026, 10, 27, 23, 30, 0, 0, time.UTC), "82345.6"),
-				monitoringTestWeight("2026-10-28", time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC), "82400"),
-			})
+			fmt.Fprint(w, `[{"calendarDate":"2026-10-28","timestampGMT":1793143800000,"weight":0,"weightDelta":-900.0000000000057},{"calendarDate":"2026-10-28","timestampGMT":1793143800000,"weight":82345.6,"weightDelta":0},{"calendarDate":"2026-10-28","timestampGMT":1793143800000,"weight":82345.600,"weightDelta":null},{"calendarDate":"2026-10-28","timestampGMT":1793172600000,"weight":82400}]`)
 		default:
 			t.Errorf("unexpected request %s", r.URL.Path)
 			w.WriteHeader(404)
@@ -393,6 +416,14 @@ func TestIntegrationSyncMonitoringEndToEnd(t *testing.T) {
 	}
 	if err := conn.QueryRow(ctx, "SELECT count(*),min(weight_kg)::text FROM weight_measurements WHERE day='2026-10-28'").Scan(&weights, &kg); err != nil || weights != 2 || kg != "82.3456" {
 		t.Fatalf("weight calendar day, count or units differ: count=%d kg=%s err=%v", weights, kg, err)
+	}
+	var delta string
+	if err := conn.QueryRow(ctx, "SELECT weight_delta::text FROM weight_measurements WHERE weight_kg=82.3456").Scan(&delta); err != nil || delta != "-900.0000000000057" {
+		t.Fatalf("weight delta=%q err=%v", delta, err)
+	}
+	var missingDelta bool
+	if err := conn.QueryRow(ctx, "SELECT weight_delta IS NULL FROM weight_measurements WHERE weight_kg=82.4").Scan(&missingDelta); err != nil || !missingDelta {
+		t.Fatalf("missing weight delta: is_null=%v err=%v", missingDelta, err)
 	}
 	out.Reset()
 	if err := run(ctx, args, getenv, &out); err != nil {

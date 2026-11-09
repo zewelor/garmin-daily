@@ -16,7 +16,7 @@ func TestMonitoringEndpoints(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/weight-service/weight/all/2026-10-28/2026-11-03":
-			fmt.Fprint(w, `[{"calendarDate":"2026-11-02","date":{"unexpected":"ignored"},"timestampGMT":1793613600000,"weight":82345.67890123456789,"weightDelta":"bad","bodyFat":null},{"calendarDate":"2026-11-02","timestampGMT":1793617200000,"weight":0,"bmi":[],"bodyFat":{"unexpected":"ignored"},"bodyWater":false,"muscleMass":"bad","boneMass":-1,"metabolicAge":null}]`)
+			fmt.Fprint(w, `[{"calendarDate":"2026-11-02","date":{"unexpected":"ignored"},"timestampGMT":1793613600000,"weight":82345.67890123456789,"weightDelta":-900.0000000000057,"bodyFat":null},{"calendarDate":"2026-11-02","timestampGMT":1793617200000,"weight":0,"bmi":[],"bodyFat":{"unexpected":"ignored"},"bodyWater":false,"muscleMass":"bad","boneMass":-1,"metabolicAge":null}]`)
 		case "/activitylist-service/activities/search/activities":
 			q := r.URL.Query()
 			if q.Get("startDate") != "2026-10-28" || q.Get("endDate") != "2026-11-03" || q.Get("excludeChildren") != "false" || q.Get("limit") != "100" || q.Get("sortOrder") != "asc" {
@@ -57,6 +57,9 @@ func TestMonitoringEndpoints(t *testing.T) {
 	}
 	if w[0].Weight.String() != "82345.67890123456789" || w[0].Timestamp.UnixMilli() != 1793613600000 || w[0].Timestamp.Location() != time.UTC {
 		t.Fatal("weight precision or timestamp changed")
+	}
+	if w[0].WeightDelta == nil || w[0].WeightDelta.String() != "-900.0000000000057" || w[1].WeightDelta != nil {
+		t.Fatal("weight delta precision or missing value changed")
 	}
 	if w[1].Weight == nil || w[1].Weight.String() != "0" || w[1].Timestamp.UnixMilli() != 1793617200000 {
 		t.Fatal("second weight measurement changed")

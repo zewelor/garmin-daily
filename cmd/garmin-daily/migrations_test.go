@@ -149,11 +149,11 @@ func TestIntegrationMigrateFreshRepeatAndConcurrent(t *testing.T) {
 			t.Fatalf("concurrent migration: %v", err)
 		}
 	}
-	assertMigrationRows(t, conn, schema, 3)
+	assertMigrationRows(t, conn, schema, len(migrations))
 	if err := migrate(ctx, conn); err != nil {
 		t.Fatalf("repeat migration: %v", err)
 	}
-	assertMigrationRows(t, conn, schema, 3)
+	assertMigrationRows(t, conn, schema, len(migrations))
 }
 
 func TestIntegrationMigrateAdoptsKnownLegacyVersions(t *testing.T) {
@@ -178,7 +178,7 @@ func TestIntegrationMigrateAdoptsKnownLegacyVersions(t *testing.T) {
 			if err := migrate(ctx, conn); err != nil {
 				t.Fatal(err)
 			}
-			assertMigrationRows(t, conn, schema, 3)
+			assertMigrationRows(t, conn, schema, len(migrations))
 			var steps, activities, weights int
 			if err := conn.QueryRow(ctx, "SELECT steps FROM daily_health WHERE day='2026-01-01'").Scan(&steps); err != nil || steps != 123 {
 				t.Fatalf("daily row not preserved: steps=%d err=%v", steps, err)
@@ -196,6 +196,35 @@ func TestIntegrationMigrateAdoptsKnownLegacyVersions(t *testing.T) {
 				t.Fatalf("weight rows=%d, want %d", weights, want)
 			}
 		})
+	}
+}
+
+func TestIntegrationMigrateVersionThreePreservesWeights(t *testing.T) {
+	ctx := context.Background()
+	conn, _, schema := migrationTestDatabase(t)
+	applyLegacyVersion(t, conn, 3)
+	if _, err := conn.Exec(ctx, migrationMetadataSQL); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := conn.Exec(ctx, `INSERT INTO schema_migrations(version,name) VALUES ($1,$2)`, i+1, migrations[i].name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO weight_measurements(measured_at,day,weight_kg) VALUES ('2026-01-01 08:00:00+00','2026-01-01',70.5)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationRows(t, conn, schema, len(migrations))
+	var weight string
+	var missingDelta bool
+	if err := conn.QueryRow(ctx, `SELECT weight_kg::text,weight_delta IS NULL FROM weight_measurements`).Scan(&weight, &missingDelta); err != nil || weight != "70.5" || !missingDelta {
+		t.Fatalf("existing weight=%q delta_is_null=%v err=%v", weight, missingDelta, err)
+	}
+	if err := migrate(ctx, conn); err != nil {
+		t.Fatalf("repeat migration: %v", err)
 	}
 }
 
@@ -284,7 +313,7 @@ func TestIntegrationMigrateRejectsUnknownAndGappedVersions(t *testing.T) {
 		name string
 		edit string
 	}{
-		{name: "future", edit: `INSERT INTO schema_migrations(version,name) VALUES (4,'future')`},
+		{name: "future", edit: `INSERT INTO schema_migrations(version,name) VALUES (5,'future')`},
 		{name: "gap", edit: `DELETE FROM schema_migrations WHERE version=2`},
 	}
 	for _, test := range tests {
@@ -414,5 +443,5 @@ func TestIntegrationMigrateRollbackOnCanceledPendingDDL(t *testing.T) {
 	if err := migrate(ctx, conn); err != nil {
 		t.Fatalf("retry after releasing lock: %v", err)
 	}
-	assertMigrationRows(t, conn, schema, 3)
+	assertMigrationRows(t, conn, schema, len(migrations))
 }

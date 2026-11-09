@@ -7,6 +7,7 @@
 !cmd/garmin-daily/schema.sql
 !cmd/garmin-daily/activity_schema.sql
 !cmd/garmin-daily/monitoring_schema.sql
+!cmd/garmin-daily/weight_delta_schema.sql
 !garmin/*.go
 # Tests run in CI and are not included in the production image build.
 **/*_test.go

@@ -54,8 +54,10 @@ activities=4 changed_rows=4
 weights=2 changed_rows=2
 ```
 
-An identical repeat reports `changed_rows=0`. Activity output contains counts
-only, not activity names, IDs or body-weight values. Daily records commit one day at a time. The
+An identical repeat reports `changed_rows=0`. The weight count is the number of
+measurements after combining compatible entries with the same timestamp.
+Activity output contains counts only, not activity names, IDs or body-weight
+values. Daily records commit one day at a time. The
 activity API pages are all fetched and validated before one transaction writes
 the requested activity range and its exercise snapshots. If activity fetching
 or writing fails, `sync` exits nonzero; already committed daily dates remain,

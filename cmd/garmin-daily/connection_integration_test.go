@@ -90,7 +90,7 @@ func TestIntegrationCLIConnectionFormats(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			assertMigrationRows(t, conn, schema, 3)
+			assertMigrationRows(t, conn, schema, len(migrations))
 		})
 	}
 }
