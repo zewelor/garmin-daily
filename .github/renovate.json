@@ -1,21 +1,14 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended", "docker:pinDigests"],
+  "extends": [
+    "config:recommended",
+    "docker:pinDigests",
+    "github>zewelor/renovate-config//presets/github-actions",
+    "github>zewelor/renovate-config//presets/go"
+  ],
   "automerge": false,
   "platformAutomerge": false,
   "packageRules": [
-    {
-      "description": "Group Go versions in the module and build image",
-      "matchDepNames": ["go", "golang"],
-      "groupName": "Go toolchain"
-    },
-    {
-      "description": "Keep the Go module directive up to date",
-      "matchManagers": ["gomod"],
-      "matchDepNames": ["go"],
-      "matchDepTypes": ["golang"],
-      "rangeStrategy": "bump"
-    },
     {
       "description": "Automerge non-major Go module and toolchain updates",
       "matchManagers": ["gomod"],
@@ -27,11 +20,6 @@
       "matchManagers": ["dockerfile"],
       "matchPackageNames": ["golang"],
       "matchUpdateTypes": ["minor", "patch", "digest"],
-      "automerge": true
-    },
-    {
-      "description": "Automerge GitHub Actions updates",
-      "matchManagers": ["github-actions"],
       "automerge": true
     },
     {

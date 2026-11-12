@@ -41,6 +41,9 @@ jobs:
       - name: Run unit tests
         run: go test ./...
 
+      - name: Check Go module files
+        run: go mod tidy -diff
+
       - name: Check Go formatting
         run: |
           files=$(gofmt -l ./cmd ./garmin)
