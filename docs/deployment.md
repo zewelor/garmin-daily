@@ -36,21 +36,51 @@ local testing only.
 ## Upgrade an existing database
 
 Run `migrate` with the schema-owner role before using this release. This is the
-same command used for fresh installations. It recognizes the three previously
-released schema versions (daily tables; daily plus activities; all monitoring
-fields) after checking their structure, records their versions and applies only
-pending migrations. Existing data is retained; new measurement columns begin as
-`NULL`. Re-import a date range to populate them.
+same command used for fresh installations. It creates `schema_migrations` if
+needed, requires consecutive versions with the expected names and rejects
+versions newer than the application knows. It retains existing history,
+including `applied_at`, and applies only pending migrations.
+
+Without history, it runs all SQL steps from the beginning. Existing application
+tables without history are not adopted: conflicting tables cause an explicit
+SQL error and the entire migration is rolled back. There is no schema detection
+or automatic reset. For an intentional rebuild, use a fresh dedicated database
+or schema, run `migrate` and re-import the required date range.
+
+Existing data is retained; new measurement columns begin as `NULL`. Re-import a
+date range to populate them.
 
 Migrations are transactional and serialized per schema. A repeated run applies
-no changes. An incomplete, modified or unknown schema, or an unsupported version
-history, fails explicitly; inspect the discrepancy before retrying. Extra
-unrelated tables do not affect migration recognition.
+no pending steps again, including migrations that change data without changing
+table structure. SQL errors and invalid history fail explicitly; inspect the
+discrepancy before retrying.
+
+**A valid history is trusted.** `migrate` does not compare application tables or
+migration metadata against a structural model. Manual changes to column types,
+constraints or other table structure may remain undetected until a later SQL
+operation fails. SQL and history-read errors remain visible. Keep migration
+history and tables together when backing up or restoring; deleting only the
+history table does not prepare a database for re-import.
+
+Run this separate command in the deployment's existing migration Job or GitOps
+PreSync hook. `sync` and `sync-activities` do not run migrations; `--dry-run`
+still does not connect to PostgreSQL. For incompatible changes, stop writers,
+run `migrate`, verify the result and restart writers. A PreSync hook alone does
+not stop existing writers, and reverting an image does not undo a database change.
 
 The migration role needs permission to alter existing tables and create tables.
 Grant the runtime writer access to `weight_measurements` and grant `SELECT` to
 any existing read-only role, using the same roles as the other data tables.
 Migration metadata does not require runtime writer access.
+
+### Add a migration
+
+Add a local SQL file, embed it and append its name and SQL to `migrations` in
+`cmd/garmin-daily/migrations.go`. List order defines version numbers. Keep applied
+SQL files and names unchanged. Add a behavior test covering the upgrade and a
+repeat run, including data preservation or correction as appropriate.
+
+There are no fingerprints or legacy schema-recognition rules to update.
 
 ## Schedule synchronization
 

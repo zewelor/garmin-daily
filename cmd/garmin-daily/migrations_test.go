@@ -102,12 +102,12 @@ func setTestSearchPath(ctx context.Context, conn *pgx.Conn, schema string) error
 	return err
 }
 
-func applyLegacyVersion(t *testing.T, conn *pgx.Conn, version int) {
+func applyMigrationSteps(t *testing.T, conn *pgx.Conn, version int) {
 	t.Helper()
 	ctx := context.Background()
 	for step := 1; step <= version; step++ {
 		if _, err := conn.Exec(ctx, migrations[step-1].sql); err != nil {
-			t.Fatalf("apply legacy version %d: %v", step, err)
+			t.Fatalf("apply migration %d: %v", step, err)
 		}
 	}
 }
@@ -156,155 +156,272 @@ func TestIntegrationMigrateFreshRepeatAndConcurrent(t *testing.T) {
 	assertMigrationRows(t, conn, schema, len(migrations))
 }
 
-func TestIntegrationMigrateAdoptsKnownLegacyVersions(t *testing.T) {
-	for legacyVersion := 1; legacyVersion <= 3; legacyVersion++ {
-		t.Run(fmt.Sprintf("version_%d", legacyVersion), func(t *testing.T) {
+func TestIntegrationMigrateRejectsUnversionedApplicationTables(t *testing.T) {
+	for version := 1; version <= len(migrations); version++ {
+		t.Run(fmt.Sprintf("version_%d", version), func(t *testing.T) {
 			ctx := context.Background()
-			conn, _, schema := migrationTestDatabase(t)
-			applyLegacyVersion(t, conn, legacyVersion)
+			conn, _, _ := migrationTestDatabase(t)
+			applyMigrationSteps(t, conn, version)
 			if _, err := conn.Exec(ctx, `INSERT INTO daily_health(day,steps) VALUES ('2026-01-01',123)`); err != nil {
 				t.Fatal(err)
 			}
-			if legacyVersion >= 2 {
-				if _, err := conn.Exec(ctx, `INSERT INTO activities(activity_id,day,started_at,sport) VALUES (7,'2026-01-01','2026-01-01 12:00:00+00','run')`); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if legacyVersion >= 3 {
+			if version >= 3 {
 				if _, err := conn.Exec(ctx, `INSERT INTO weight_measurements(measured_at,day,weight_kg) VALUES ('2026-01-01 08:00:00+00','2026-01-01',70.5)`); err != nil {
 					t.Fatal(err)
 				}
 			}
+			if err := migrate(ctx, conn); err == nil || !strings.Contains(err.Error(), "42P07") {
+				t.Fatalf("expected duplicate-table SQLSTATE without legacy adoption, got %v", err)
+			}
+			var metadataExists bool
+			if err := conn.QueryRow(ctx, `SELECT to_regclass('schema_migrations') IS NOT NULL`).Scan(&metadataExists); err != nil || metadataExists {
+				t.Fatalf("failed migration left history: exists=%v err=%v", metadataExists, err)
+			}
+			var steps int
+			if err := conn.QueryRow(ctx, `SELECT steps FROM daily_health`).Scan(&steps); err != nil || steps != 123 {
+				t.Fatalf("existing data changed: steps=%d err=%v", steps, err)
+			}
+			if version >= 3 {
+				var weight string
+				if err := conn.QueryRow(ctx, `SELECT weight_kg::text FROM weight_measurements`).Scan(&weight); err != nil || weight != "70.5" {
+					t.Fatalf("existing weight changed: weight=%q err=%v", weight, err)
+				}
+			}
+		})
+	}
+}
+
+func TestIntegrationMigrateUsesReadableHistoryWithoutShapeCheck(t *testing.T) {
+	ctx := context.Background()
+	conn, _, schema := migrationTestDatabase(t)
+	if err := migrate(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `ALTER TABLE schema_migrations ADD COLUMN note text`); err != nil {
+		t.Fatal(err)
+	}
+	before := migrationHistory(t, conn, len(migrations))
+	if err := migrate(ctx, conn); err != nil {
+		t.Fatalf("readable history should not require a structural fingerprint: %v", err)
+	}
+	assertMigrationRows(t, conn, schema, len(migrations))
+	if after := migrationHistory(t, conn, len(migrations)); after != before {
+		t.Fatalf("existing history changed: before=%s after=%s", before, after)
+	}
+}
+
+func TestIntegrationMigrateReportsUnreadableHistory(t *testing.T) {
+	ctx := context.Background()
+	conn, _, _ := migrationTestDatabase(t)
+	if _, err := conn.Exec(ctx, `CREATE TABLE schema_migrations (version integer PRIMARY KEY); INSERT INTO schema_migrations VALUES (1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(ctx, conn); err == nil || !strings.Contains(err.Error(), "42703") {
+		t.Fatalf("expected missing-column SQLSTATE, got %v", err)
+	}
+	var version int
+	if err := conn.QueryRow(ctx, `SELECT version FROM schema_migrations`).Scan(&version); err != nil || version != 1 {
+		t.Fatalf("unreadable history changed: version=%d err=%v", version, err)
+	}
+	var healthExists bool
+	if err := conn.QueryRow(ctx, `SELECT to_regclass('daily_health') IS NOT NULL`).Scan(&healthExists); err != nil || healthExists {
+		t.Fatalf("failed history read created application tables: exists=%v err=%v", healthExists, err)
+	}
+}
+
+func TestIntegrationMigrateRollsBackFreshDatabase(t *testing.T) {
+	ctx := context.Background()
+	conn, _, schema := migrationTestDatabase(t)
+	appendTestMigrations(t, migration{name: "fail", sql: `SELECT * FROM nonexistent_migration_table`})
+	if err := migrate(ctx, conn); err == nil || !strings.Contains(err.Error(), "42P01") {
+		t.Fatalf("expected undefined-table SQLSTATE, got %v", err)
+	}
+	var count int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1`, schema).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("failed fresh migration left relations: count=%d err=%v", count, err)
+	}
+	migrations[len(migrations)-1].sql = `SELECT 1`
+	if err := migrate(ctx, conn); err != nil {
+		t.Fatalf("retry fresh migration: %v", err)
+	}
+	assertMigrationRows(t, conn, schema, len(migrations))
+}
+
+func TestIntegrationMigratePreservesVersionedHistory(t *testing.T) {
+	for version := 1; version <= len(migrations); version++ {
+		t.Run(fmt.Sprintf("version_%d", version), func(t *testing.T) {
+			ctx := context.Background()
+			conn, _, schema := migrationTestDatabase(t)
+			applyMigrationSteps(t, conn, version)
+			if _, err := conn.Exec(ctx, migrationMetadataSQL); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < version; i++ {
+				if _, err := conn.Exec(ctx, `INSERT INTO schema_migrations(version,name,applied_at) VALUES ($1,$2,'2026-01-01 00:00:00+00')`, i+1, migrations[i].name); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := migrationHistory(t, conn, version)
+			if _, err := conn.Exec(ctx, `INSERT INTO daily_health(day,steps) VALUES ('2026-01-01',123)`); err != nil {
+				t.Fatal(err)
+			}
+			if version >= 3 {
+				if _, err := conn.Exec(ctx, `INSERT INTO weight_measurements(measured_at,day,weight_kg) VALUES ('2026-01-01 08:00:00+00','2026-01-01',70.5)`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for range 2 {
+				if err := migrate(ctx, conn); err != nil {
+					t.Fatal(err)
+				}
+			}
+			assertMigrationRows(t, conn, schema, len(migrations))
+			if after := migrationHistory(t, conn, version); after != before {
+				t.Fatalf("existing history changed: before=%s after=%s", before, after)
+			}
+			var steps int
+			if err := conn.QueryRow(ctx, `SELECT steps FROM daily_health`).Scan(&steps); err != nil || steps != 123 {
+				t.Fatalf("existing data changed: steps=%d err=%v", steps, err)
+			}
+			if version >= 3 {
+				var weight string
+				var missingDelta bool
+				if err := conn.QueryRow(ctx, `SELECT weight_kg::text,weight_delta IS NULL FROM weight_measurements`).Scan(&weight, &missingDelta); err != nil || weight != "70.5" || !missingDelta {
+					t.Fatalf("existing weight=%q delta_is_null=%v err=%v", weight, missingDelta, err)
+				}
+			}
+		})
+	}
+}
+
+func TestIntegrationMigrateTrustsRecordedApplicationVersion(t *testing.T) {
+	for _, edit := range []string{
+		`ALTER TABLE daily_health ALTER COLUMN steps TYPE bigint`,
+		`ALTER TABLE daily_sleep DROP CONSTRAINT daily_sleep_day_fkey`,
+	} {
+		t.Run(edit, func(t *testing.T) {
+			ctx := context.Background()
+			conn, _, schema := migrationTestDatabase(t)
 			if err := migrate(ctx, conn); err != nil {
 				t.Fatal(err)
 			}
+			if _, err := conn.Exec(ctx, `INSERT INTO daily_health(day,steps) VALUES ('2026-01-01',123)`); err != nil {
+				t.Fatal(err)
+			}
+			before := migrationHistory(t, conn, len(migrations))
+			if _, err := conn.Exec(ctx, edit); err != nil {
+				t.Fatal(err)
+			}
+			if err := migrate(ctx, conn); err != nil {
+				t.Fatalf("valid history should be trusted despite application drift: %v", err)
+			}
 			assertMigrationRows(t, conn, schema, len(migrations))
-			var steps, activities, weights int
-			if err := conn.QueryRow(ctx, "SELECT steps FROM daily_health WHERE day='2026-01-01'").Scan(&steps); err != nil || steps != 123 {
-				t.Fatalf("daily row not preserved: steps=%d err=%v", steps, err)
+			if after := migrationHistory(t, conn, len(migrations)); after != before {
+				t.Fatalf("existing migration history changed: before=%s after=%s", before, after)
 			}
-			if err := conn.QueryRow(ctx, "SELECT count(*) FROM activities").Scan(&activities); err != nil {
-				t.Fatal(err)
-			}
-			if want := boolInt(legacyVersion >= 2); activities != want {
-				t.Fatalf("activity rows=%d, want %d", activities, want)
-			}
-			if err := conn.QueryRow(ctx, "SELECT count(*) FROM weight_measurements").Scan(&weights); err != nil {
-				t.Fatal(err)
-			}
-			if want := boolInt(legacyVersion >= 3); weights != want {
-				t.Fatalf("weight rows=%d, want %d", weights, want)
+			var steps int
+			if err := conn.QueryRow(ctx, `SELECT steps FROM daily_health WHERE day='2026-01-01'`).Scan(&steps); err != nil || steps != 123 {
+				t.Fatalf("data changed: steps=%d err=%v", steps, err)
 			}
 		})
 	}
 }
 
-func TestIntegrationMigrateVersionThreePreservesWeights(t *testing.T) {
+func migrationHistory(t *testing.T, conn *pgx.Conn, through int) string {
+	t.Helper()
+	var history string
+	if err := conn.QueryRow(context.Background(), `SELECT COALESCE(jsonb_agg(to_jsonb(m) ORDER BY version)::text,'[]') FROM schema_migrations m WHERE version <= $1`, through).Scan(&history); err != nil {
+		t.Fatal(err)
+	}
+	return history
+}
+
+// Migration tests run sequentially; restore the production list after each test.
+func appendTestMigrations(t *testing.T, steps ...migration) {
+	t.Helper()
+	original := migrations
+	migrations = append(append([]migration(nil), original...), steps...)
+	t.Cleanup(func() { migrations = original })
+}
+
+func TestIntegrationMigrateDataStepOnceWithConcurrentRuns(t *testing.T) {
 	ctx := context.Background()
-	conn, _, schema := migrationTestDatabase(t)
-	applyLegacyVersion(t, conn, 3)
-	if _, err := conn.Exec(ctx, migrationMetadataSQL); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 3; i++ {
-		if _, err := conn.Exec(ctx, `INSERT INTO schema_migrations(version,name) VALUES ($1,$2)`, i+1, migrations[i].name); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := conn.Exec(ctx, `INSERT INTO weight_measurements(measured_at,day,weight_kg) VALUES ('2026-01-01 08:00:00+00','2026-01-01',70.5)`); err != nil {
-		t.Fatal(err)
-	}
+	conn, dsn, schema := migrationTestDatabase(t)
 	if err := migrate(ctx, conn); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO daily_health(day,steps) VALUES ('2026-01-01',123);
+		INSERT INTO weight_measurements(measured_at,day,weight_kg) VALUES ('2026-01-01 08:00:00+00','2026-01-01',70.5);
+		UPDATE schema_migrations SET applied_at='2026-01-01 00:00:00+00'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	previousVersion := len(migrations)
+	before := migrationHistory(t, conn, previousVersion)
+	appendTestMigrations(t, migration{name: "correct_data", sql: `
+		UPDATE daily_health SET steps=steps+1;
+		UPDATE weight_measurements SET weight_kg=weight_kg+0.1
+	`})
+	second, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close(ctx)
+	if err := setTestSearchPath(ctx, second, schema); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, candidate := range []*pgx.Conn{conn, second} {
+		go func(candidate *pgx.Conn) {
+			<-start
+			results <- migrate(ctx, candidate)
+		}(candidate)
+	}
+	close(start)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Errorf("concurrent data migration: %v", err)
+		}
+	}
+	if err := migrate(ctx, conn); err != nil {
+		t.Fatalf("repeat data migration: %v", err)
+	}
+	var steps int
+	var weight string
+	if err := conn.QueryRow(ctx, `SELECT steps FROM daily_health`).Scan(&steps); err != nil || steps != 124 {
+		t.Fatalf("data step was not applied exactly once: steps=%d err=%v", steps, err)
+	}
+	if err := conn.QueryRow(ctx, `SELECT weight_kg::text FROM weight_measurements`).Scan(&weight); err != nil || weight != "70.6" {
+		t.Fatalf("weight correction was not applied exactly once: weight=%q err=%v", weight, err)
 	}
 	assertMigrationRows(t, conn, schema, len(migrations))
-	var weight string
-	var missingDelta bool
-	if err := conn.QueryRow(ctx, `SELECT weight_kg::text,weight_delta IS NULL FROM weight_measurements`).Scan(&weight, &missingDelta); err != nil || weight != "70.5" || !missingDelta {
-		t.Fatalf("existing weight=%q delta_is_null=%v err=%v", weight, missingDelta, err)
+	if after := migrationHistory(t, conn, previousVersion); after != before {
+		t.Fatalf("existing history changed: before=%s after=%s", before, after)
 	}
+}
+
+func TestIntegrationMigrateSchemaStep(t *testing.T) {
+	ctx := context.Background()
+	conn, _, schema := migrationTestDatabase(t)
 	if err := migrate(ctx, conn); err != nil {
-		t.Fatalf("repeat migration: %v", err)
+		t.Fatal(err)
 	}
-}
-
-func TestIntegrationCatalogFingerprints(t *testing.T) {
-	for version := 0; version <= len(migrations); version++ {
-		version := version
-		t.Run(fmt.Sprintf("application_v%d", version), func(t *testing.T) {
-			ctx := context.Background()
-			conn, _, schema := migrationTestDatabase(t)
-			applyLegacyVersion(t, conn, version)
-			tx, err := conn.Begin(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			actual, err := catalogShape(ctx, tx, schema, applicationTables)
-			if err != nil {
-				tx.Rollback(ctx)
-				t.Fatal(err)
-			}
-			if err := tx.Rollback(ctx); err != nil {
-				t.Fatal(err)
-			}
-			want := applicationFingerprint(version)
-			if actual.fingerprint != want {
-				t.Fatalf("fingerprint mismatch: actual=%s expected=%s", actual.fingerprint, want)
-			}
-		})
+	if _, err := conn.Exec(ctx, `INSERT INTO daily_health(day,steps) VALUES ('2026-01-01',123)`); err != nil {
+		t.Fatal(err)
 	}
-
-	t.Run("metadata", func(t *testing.T) {
-		ctx := context.Background()
-		conn, _, schema := migrationTestDatabase(t)
-		tx, err := conn.Begin(ctx)
-		if err != nil {
+	appendTestMigrations(t, migration{name: "extra_column", sql: `ALTER TABLE daily_health ADD COLUMN extra integer`})
+	for range 2 {
+		if err := migrate(ctx, conn); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := tx.Exec(ctx, migrationMetadataSQL); err != nil {
-			tx.Rollback(ctx)
-			t.Fatal(err)
-		}
-		actual, err := catalogShape(ctx, tx, schema, []string{"schema_migrations"})
-		if err != nil {
-			tx.Rollback(ctx)
-			t.Fatal(err)
-		}
-		if err := tx.Rollback(ctx); err != nil {
-			t.Fatal(err)
-		}
-		if actual.fingerprint != migrationMetadataFingerprint {
-			t.Fatalf("fingerprint mismatch: actual=%s expected=%s", actual.fingerprint, migrationMetadataFingerprint)
-		}
-	})
-}
-
-func boolInt(value bool) int {
-	if value {
-		return 1
 	}
-	return 0
-}
-
-func TestIntegrationMigrateRejectsPartialAndWrongTypeSchemas(t *testing.T) {
-	tests := []struct {
-		name string
-		ddl  string
-	}{
-		{name: "partial", ddl: `CREATE TABLE daily_health (day date PRIMARY KEY)`},
-		{name: "wrong_type", ddl: schemaSQL + ` ALTER TABLE daily_health ALTER COLUMN steps TYPE bigint`},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			ctx := context.Background()
-			conn, _, _ := migrationTestDatabase(t)
-			if _, err := conn.Exec(ctx, test.ddl); err != nil {
-				t.Fatal(err)
-			}
-			if err := migrate(ctx, conn); err == nil {
-				t.Fatal("migrate accepted an unknown unversioned schema")
-			}
-		})
+	assertMigrationRows(t, conn, schema, len(migrations))
+	var steps int
+	var extra *int
+	if err := conn.QueryRow(ctx, `SELECT steps,extra FROM daily_health`).Scan(&steps, &extra); err != nil || steps != 123 || extra != nil {
+		t.Fatalf("data changed during schema upgrade: steps=%d extra=%v err=%v", steps, extra, err)
 	}
 }
 
@@ -315,6 +432,9 @@ func TestIntegrationMigrateRejectsUnknownAndGappedVersions(t *testing.T) {
 	}{
 		{name: "future", edit: `INSERT INTO schema_migrations(version,name) VALUES (5,'future')`},
 		{name: "gap", edit: `DELETE FROM schema_migrations WHERE version=2`},
+		{name: "wrong_name", edit: `UPDATE schema_migrations SET name='unexpected' WHERE version=2`},
+		{name: "zero", edit: `INSERT INTO schema_migrations(version,name) VALUES (0,'invalid')`},
+		{name: "negative", edit: `INSERT INTO schema_migrations(version,name) VALUES (-1,'invalid')`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -326,122 +446,213 @@ func TestIntegrationMigrateRejectsUnknownAndGappedVersions(t *testing.T) {
 			if _, err := conn.Exec(ctx, test.edit); err != nil {
 				t.Fatal(err)
 			}
+			before := migrationHistory(t, conn, len(migrations)+1)
 			if err := migrate(ctx, conn); err == nil {
 				t.Fatal("migrate accepted unknown or gapped version metadata")
 			}
+			if after := migrationHistory(t, conn, len(migrations)+1); after != before {
+				t.Fatalf("refused history changed: before=%s after=%s", before, after)
+			}
 		})
 	}
 }
 
-func TestIntegrationMigrateRejectsWrongMetadataAndExternalForeignKey(t *testing.T) {
-	t.Run("metadata_type", func(t *testing.T) {
-		ctx := context.Background()
-		conn, _, _ := migrationTestDatabase(t)
+func TestIntegrationMigrateRollsBackAppliedSteps(t *testing.T) {
+	for _, failure := range []string{"bad_sql", "canceled"} {
+		t.Run(failure, func(t *testing.T) {
+			ctx := context.Background()
+			conn, dsn, schema := migrationTestDatabase(t)
+			if err := migrate(ctx, conn); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := conn.Exec(ctx, `
+				INSERT INTO daily_health(day,steps) VALUES ('2026-01-01',123);
+				INSERT INTO weight_measurements(measured_at,day,weight_kg) VALUES ('2026-01-01 08:00:00+00','2026-01-01',70.5);
+				CREATE TABLE migration_gate (id integer)
+			`); err != nil {
+				t.Fatal(err)
+			}
+			before := migrationHistory(t, conn, len(migrations))
+			failingSQL := `SELECT * FROM nonexistent_migration_table`
+			if failure == "canceled" {
+				failingSQL = `SELECT * FROM migration_gate`
+			}
+			appendTestMigrations(t,
+				migration{name: "change_data", sql: `
+					CREATE TABLE migration_probe (id integer);
+					UPDATE daily_health SET steps=steps+1;
+					UPDATE weight_measurements SET weight_kg=weight_kg+0.1
+				`},
+				migration{name: "fail", sql: failingSQL},
+			)
+			control, err := pgx.Connect(ctx, dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer control.Close(ctx)
+			if err := setTestSearchPath(ctx, control, schema); err != nil {
+				t.Fatal(err)
+			}
+			runCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			if failure == "canceled" {
+				if _, err := control.Exec(ctx, `BEGIN; LOCK TABLE migration_gate IN ACCESS EXCLUSIVE MODE`); err != nil {
+					t.Fatal(err)
+				}
+				result := make(chan error, 1)
+				go func() { result <- migrate(runCtx, conn) }()
+				deadline := time.Now().Add(5 * time.Second)
+				for {
+					var blocked bool
+					if err := control.QueryRow(ctx, `SELECT $1::integer=ANY(pg_blocking_pids($2))`, int32(control.PgConn().PID()), int32(conn.PgConn().PID())).Scan(&blocked); err != nil {
+						t.Fatal(err)
+					}
+					if blocked {
+						break
+					}
+					select {
+					case err := <-result:
+						t.Fatalf("migration returned before the second step: %v", err)
+					default:
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("migration did not reach the blocked second step")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				cancel()
+				err = <-result
+				if _, rollbackErr := control.Exec(ctx, `ROLLBACK`); rollbackErr != nil {
+					t.Fatal(rollbackErr)
+				}
+			} else {
+				err = migrate(runCtx, conn)
+			}
+			if err == nil {
+				t.Fatal("failed migration succeeded")
+			}
+			if failure == "bad_sql" && !strings.Contains(err.Error(), "42P01") {
+				t.Fatalf("expected undefined-table SQLSTATE, got %v", err)
+			}
+			var probeExists bool
+			if err := control.QueryRow(ctx, `SELECT to_regclass('migration_probe') IS NOT NULL`).Scan(&probeExists); err != nil || probeExists {
+				t.Fatalf("first-step DDL survived rollback: exists=%v err=%v", probeExists, err)
+			}
+			var steps int
+			var weight string
+			if err := control.QueryRow(ctx, `SELECT steps FROM daily_health`).Scan(&steps); err != nil || steps != 123 {
+				t.Fatalf("first-step data survived rollback: steps=%d err=%v", steps, err)
+			}
+			if err := control.QueryRow(ctx, `SELECT weight_kg::text FROM weight_measurements`).Scan(&weight); err != nil || weight != "70.5" {
+				t.Fatalf("first-step weight survived rollback: weight=%q err=%v", weight, err)
+			}
+			if after := migrationHistory(t, control, len(migrations)); after != before {
+				t.Fatalf("failed steps changed history: before=%s after=%s", before, after)
+			}
+			// Retry on a usable connection after correcting the test-only SQL.
+			migrations[len(migrations)-1].sql = `SELECT 1`
+			if err := migrate(ctx, control); err != nil {
+				t.Fatalf("retry failed: %v", err)
+			}
+			assertMigrationRows(t, control, schema, len(migrations))
+		})
+	}
+}
+
+func TestIntegrationMigrateIsolatesSelectedSchema(t *testing.T) {
+	ctx := context.Background()
+	conn, _, schema := migrationTestDatabase(t)
+	other, _, otherSchema := migrationTestDatabase(t)
+	if err := migrate(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Exec(ctx, `
+		INSERT INTO daily_health(day,steps) VALUES ('2026-01-01',999);
+		INSERT INTO schema_migrations(version,name) VALUES (99,'future')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	before := migrationHistory(t, other, 99)
+	// Metadata exists only in a later search_path schema; it must not be adopted.
+	searchPath := pgx.Identifier{schema}.Sanitize() + ", " + pgx.Identifier{otherSchema}.Sanitize()
+	if _, err := conn.Exec(ctx, "SET search_path TO "+searchPath); err != nil {
+		t.Fatal(err)
+	}
+	var originalPath string
+	if err := conn.QueryRow(ctx, `SHOW search_path`).Scan(&originalPath); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
 		if err := migrate(ctx, conn); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := conn.Exec(ctx, `ALTER TABLE schema_migrations ALTER COLUMN name TYPE varchar`); err != nil {
-			t.Fatal(err)
-		}
-		if err := migrate(ctx, conn); err == nil {
-			t.Fatal("migrate accepted a mismatched schema_migrations table")
-		}
-	})
-
-	t.Run("same_named_external_foreign_key", func(t *testing.T) {
-		ctx := context.Background()
-		conn, _, schema := migrationTestDatabase(t)
-		externalSchema := schema + "_external"
-		if _, err := conn.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{externalSchema}.Sanitize()); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			if _, err := conn.Exec(context.Background(), "DROP SCHEMA "+pgx.Identifier{externalSchema}.Sanitize()+" CASCADE"); err != nil {
-				t.Error(err)
-			}
-		})
-		applyLegacyVersion(t, conn, 1)
-		if _, err := conn.Exec(ctx, "CREATE TABLE "+pgx.Identifier{externalSchema, "daily_health"}.Sanitize()+" (day date PRIMARY KEY)"); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := conn.Exec(ctx, `ALTER TABLE daily_sleep DROP CONSTRAINT daily_sleep_day_fkey`); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := conn.Exec(ctx, "ALTER TABLE daily_sleep ADD CONSTRAINT daily_sleep_day_fkey FOREIGN KEY (day) REFERENCES "+pgx.Identifier{externalSchema, "daily_health"}.Sanitize()+"(day)"); err != nil {
-			t.Fatal(err)
-		}
-		if err := migrate(ctx, conn); err == nil {
-			t.Fatal("migrate accepted a foreign key to an external same-named table")
-		}
-	})
-}
-
-func TestIntegrationMigrateRollbackOnCanceledPendingDDL(t *testing.T) {
-	ctx := context.Background()
-	conn, dsn, schema := migrationTestDatabase(t)
-	applyLegacyVersion(t, conn, 2)
+	}
 	if _, err := conn.Exec(ctx, `INSERT INTO daily_health(day,steps) VALUES ('2026-01-01',123)`); err != nil {
 		t.Fatal(err)
 	}
-	control, err := pgx.Connect(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer control.Close(ctx)
-	qualifiedHealth := pgx.Identifier{schema, "daily_health"}.Sanitize()
-	if _, err := control.Exec(ctx, "BEGIN; LOCK TABLE "+qualifiedHealth+" IN ACCESS EXCLUSIVE MODE"); err != nil {
-		t.Fatal(err)
-	}
-	result := make(chan error, 1)
-	go func() { result <- migrate(ctx, conn) }()
-	deadline := time.Now().Add(5 * time.Second)
-	waiting := false
-	for time.Now().Before(deadline) {
-		var waitType *string
-		if err := control.QueryRow(ctx, "SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1", int64(conn.PgConn().PID())).Scan(&waitType); err != nil {
-			t.Fatal(err)
-		}
-		if waitType != nil && *waitType == "Lock" {
-			waiting = true
-			break
-		}
-		select {
-		case err := <-result:
-			t.Fatalf("migration returned before reaching pending DDL: %v", err)
-		default:
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !waiting {
-		t.Fatal("migration did not wait for the locked pending DDL")
-	}
-	var canceled bool
-	if err := control.QueryRow(ctx, "SELECT pg_cancel_backend($1)", int64(conn.PgConn().PID())).Scan(&canceled); err != nil || !canceled {
-		t.Fatalf("cancel migration query: canceled=%v err=%v", canceled, err)
-	}
-	if err := <-result; err == nil {
-		t.Fatal("canceled pending migration succeeded")
-	}
-	if _, err := control.Exec(ctx, "ROLLBACK"); err != nil {
-		t.Fatal(err)
-	}
-	var metadataExists bool
-	if err := conn.QueryRow(ctx, "SELECT to_regclass('schema_migrations') IS NOT NULL").Scan(&metadataExists); err != nil || metadataExists {
-		t.Fatalf("migration metadata survived rollback: exists=%v err=%v", metadataExists, err)
-	}
-	var respirationColumn bool
-	if err := conn.QueryRow(ctx, `SELECT EXISTS (
-		SELECT 1 FROM information_schema.columns
-		WHERE table_schema=$1 AND table_name='daily_health' AND column_name='respiration_avg'
-	)`, schema).Scan(&respirationColumn); err != nil || respirationColumn {
-		t.Fatalf("pending v3 DDL survived rollback: column=%v err=%v", respirationColumn, err)
-	}
-	var steps int
-	if err := conn.QueryRow(ctx, "SELECT steps FROM daily_health WHERE day='2026-01-01'").Scan(&steps); err != nil || steps != 123 {
-		t.Fatalf("legacy data changed after rollback: steps=%d err=%v", steps, err)
-	}
-	if err := migrate(ctx, conn); err != nil {
-		t.Fatalf("retry after releasing lock: %v", err)
-	}
 	assertMigrationRows(t, conn, schema, len(migrations))
+	if after := migrationHistory(t, other, 99); after != before {
+		t.Fatalf("other schema history changed: before=%s after=%s", before, after)
+	}
+	for _, test := range []struct {
+		conn *pgx.Conn
+		want int
+	}{{conn, 123}, {other, 999}} {
+		var steps int
+		if err := test.conn.QueryRow(ctx, `SELECT steps FROM daily_health`).Scan(&steps); err != nil || steps != test.want {
+			t.Fatalf("schema data changed: steps=%d want=%d err=%v", steps, test.want, err)
+		}
+	}
+	var restoredPath string
+	if err := conn.QueryRow(ctx, `SHOW search_path`).Scan(&restoredPath); err != nil || restoredPath != originalPath {
+		t.Fatalf("session search_path changed: actual=%q want=%q err=%v", restoredPath, originalPath, err)
+	}
+}
+
+func TestIntegrationMigrateRejectsMissingCurrentSchema(t *testing.T) {
+	ctx := context.Background()
+	conn, _, schema := migrationTestDatabase(t)
+	if _, err := conn.Exec(ctx, `SET search_path TO nonexistent_migration_schema`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(ctx, conn); err == nil || !strings.Contains(err.Error(), "current_schema() is not set") {
+		t.Fatalf("expected missing-schema refusal, got %v", err)
+	}
+	var count int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1`, schema).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("missing-schema migration created relations: count=%d err=%v", count, err)
+	}
+}
+
+func TestIntegrationSyncCommandsDoNotMigrate(t *testing.T) {
+	for _, command := range []string{"sync", "sync-activities"} {
+		t.Run(command, func(t *testing.T) {
+			ctx := context.Background()
+			conn, dsn, schema := migrationTestDatabase(t)
+			databaseURL, err := url.Parse(dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			query := databaseURL.Query()
+			query.Set("search_path", schema)
+			databaseURL.RawQuery = query.Encode()
+			installPreviewHTTP(t)
+			err = run(ctx, []string{command, "--from", "2026-11-02", "--to", "2026-11-02"}, func(name string) string {
+				switch name {
+				case "DATABASE_URL":
+					return databaseURL.String()
+				case "GARMIN_API_KEY":
+					return "synthetic-key"
+				}
+				return ""
+			}, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "42P01") {
+				t.Fatalf("expected missing-table SQLSTATE, got %v", err)
+			}
+			var count int
+			if err := conn.QueryRow(ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1`, schema).Scan(&count); err != nil || count != 0 {
+				t.Fatalf("sync created relations: count=%d err=%v", count, err)
+			}
+		})
+	}
 }
