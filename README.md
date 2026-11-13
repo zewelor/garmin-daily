@@ -186,8 +186,7 @@ cover validation, repeat imports, corrections, missing readings, exact decimals,
 transaction rollback and connection recovery.
 
 CI runs formatting, vet, unit and PostgreSQL integration checks, then builds and
-smoke-tests the container. Verified default-branch builds publish Linux amd64 and
-arm64 images to [GHCR](https://github.com/users/zewelor/packages/container/package/garmin-daily).
+smoke-tests the container. Verified default-branch pushes and manual runs on the default branch publish Linux amd64 and arm64 images to [GHCR](https://github.com/users/zewelor/packages/container/package/garmin-daily).
 Use the published digest to pin a deployment; [image tags and retention](docs/usage.md#container-images)
 are documented separately.
 
