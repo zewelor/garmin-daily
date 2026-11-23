@@ -75,6 +75,10 @@ jobs:
         run: docker compose --env-file /dev/null -p garmin-daily-integration down --volumes --remove-orphans
 
   publish:
+    concurrency:
+      group: ghcr-${{ github.repository }}
+      queue: max
+      cancel-in-progress: false
     needs: verify
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -127,12 +131,3 @@ jobs:
         env:
           DIGEST: ${{ steps.image.outputs.digest }}
         run: echo "$IMAGE@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Remove old images
-        uses: dataaxiom/ghcr-cleanup-action@ac45a8c04b1eb4b27974ca79a0a74f344c93664b # v1.3.0
-        with:
-          package: ${{ github.event.repository.name }}
-          keep-n-tagged: 10
-          keep-n-untagged: 10
-          exclude-tags: latest
-          delete-partial-images: true

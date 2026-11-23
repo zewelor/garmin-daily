@@ -121,9 +121,12 @@ not receive package-write permissions and never publish images. A manual
 
 `docker/metadata-action` generates tags and OCI source/revision labels. Publishing
 uses `GITHUB_TOKEN`; no separate registry secret is needed. The published digest
-appears in the job summary. Layer caching is enabled, and cleanup retains 10
-recent tagged and 10 untagged versions while protecting `latest`. Older versions
-may be removed, so a commit tag is not a promise of indefinite retention.
+appears in the job summary, and layer caching is enabled. The `GHCR cleanup`
+workflow runs on Sundays at 03:17 UTC and validates multi-architecture manifests.
+It retains 10 recent tagged and 10 untagged versions while protecting `latest`.
+Older versions may be removed, so a commit tag is not a promise of indefinite
+retention. Manual runs on the default branch preview deletions by default. Clear
+the `dry_run` input to apply cleanup.
 
 The image contains no API keys, database settings, account data or `.env` files.
 The production build context allows only application source, module files, the three
