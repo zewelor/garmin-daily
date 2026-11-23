@@ -76,9 +76,10 @@ Migration metadata does not require runtime writer access.
 ### Add a migration
 
 Add a local SQL file, embed it and append its name and SQL to `migrations` in
-`cmd/garmin-daily/migrations.go`. List order defines version numbers. Keep applied
-SQL files and names unchanged. Add a behavior test covering the upgrade and a
-repeat run, including data preservation or correction as appropriate.
+`cmd/garmin-daily/migrations.go`. Add the file to `.dockerignore` and the image
+inputs in `.github/workflows/ci.yml`. List order defines version numbers. Keep
+applied SQL files and names unchanged. Add a behavior test covering the upgrade
+and a repeat run, including data preservation or correction as appropriate.
 
 There are no fingerprints or legacy schema-recognition rules to update.
 
@@ -147,6 +148,24 @@ Ingress or HTTP server. CA certificates and IANA timezone data are included.
 See the [README](../README.md#quick-start) for `docker run` and local Compose
 examples. Publishing the image does not migrate a database or deploy anything
 to an existing environment.
+
+## Image publication
+
+CI verifies pull requests and pushes to `main` that change CI-relevant files.
+Changes confined to the README, `docs/`, local agent skills, the skills lock
+file, or `.github/` are skipped. Changes to `.github/workflows/ci.yml` run CI.
+
+After verification, a push to `main` can publish `latest` and a tag with the
+full commit SHA when the complete push changes a production image input. Inputs
+include the Dockerfile, Docker context rules, Go module files, production Go
+source, embedded SQL migrations and the license. A newer commit on `main` that
+changes an image input supersedes an older push, even if the newer run fails
+or the change is later reverted. Changes to tests, local Compose, and CI tooling
+can still run verification and leave an earlier image push eligible.
+
+Pull requests run verification with read-only repository access. A manual run
+on `main` publishes only `manual-<short-sha>` after verification. The workflow
+summary records the published image digest.
 
 ## Backups and dashboards
 

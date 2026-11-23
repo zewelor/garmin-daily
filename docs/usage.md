@@ -110,14 +110,14 @@ for **Linux amd64 and arm64**.
 
 | Reference | Meaning |
 | --- | --- |
-| `latest` | Most recently verified and published commit from the default branch. |
-| `<full-commit-SHA>` | Image built from a specific commit. |
+| `latest` | Latest image published by an eligible push to the default branch. |
+| `<full-commit-SHA>` | Image published by an eligible push at this commit. |
+| `manual-<short-sha>` | Image published by a manual CI run from the default branch. |
 | `@sha256:…` | Exact published image digest; use this to pin deployments. |
 
 CI verifies formatting, `go vet`, unit tests, PostgreSQL integration tests, the
-container build and a container migration before publishing. Pull requests do
-not receive package-write permissions and never publish images. A manual
-`workflow_dispatch` run on the default branch can repeat verification and publication.
+container build and a container migration before publishing. See the
+[publication rules](deployment.md#image-publication) for push and manual runs.
 
 `docker/metadata-action` generates tags and OCI source/revision labels. Publishing
 uses `GITHUB_TOKEN`; no separate registry secret is needed. The published digest
@@ -129,5 +129,5 @@ retention. Manual runs on the default branch preview deletions by default. Clear
 the `dry_run` input to apply cleanup.
 
 The image contains no API keys, database settings, account data or `.env` files.
-The production build context allows only application source, module files, the three
+The production build context allows only application source, module files,
 embedded SQL migrations and the license; tests are excluded.

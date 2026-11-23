@@ -2,15 +2,24 @@ name: CI
 
 on:
   pull_request:
+    paths: &ci_paths
+      - '**'
+      - '!README.md'
+      - '!docs/**'
+      - '!.agents/skills/**'
+      - '!skills-lock.json'
+      - '!.github/**'
+      - '.github/workflows/ci.yml'
   push:
     branches: [main]
+    paths: *ci_paths
   workflow_dispatch:
 
 permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  queue: max
 
 jobs:
   verify:
@@ -75,14 +84,14 @@ jobs:
         run: docker compose --env-file /dev/null -p garmin-daily-integration down --volumes --remove-orphans
 
   publish:
+    needs: verify
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     concurrency:
       group: ghcr-${{ github.repository }}
       queue: max
       cancel-in-progress: false
-    needs: verify
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
@@ -92,22 +101,80 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Fetch the current branch tip without replacing it with the event SHA.
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
+      - name: Check publication revision
+        id: revision
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            echo "::notice::Only the exact default branch ref may publish"
+            exit 0
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            # Keep these paths aligned with Dockerfile and .dockerignore.
+            image_inputs=(
+              Dockerfile .dockerignore go.mod go.sum LICENSE
+              ':(glob)cmd/garmin-daily/*.go'
+              cmd/garmin-daily/schema.sql
+              cmd/garmin-daily/activity_schema.sql
+              cmd/garmin-daily/monitoring_schema.sql
+              cmd/garmin-daily/weight_delta_schema.sql
+              ':(glob)garmin/*.go'
+              ':(exclude,glob)**/*_test.go'
+            )
+
+            if [[ "${PUSH_BEFORE:?Missing push base SHA}" == 0000000000000000000000000000000000000000 ]]; then
+              # Compare the first push to an empty tree when the branch is created.
+              before=$(git mktree </dev/null)
+            else
+              before=$(git rev-parse --verify --end-of-options "$PUSH_BEFORE^{commit}")
+            fi
+            changed=$(git diff --no-renames --name-only "$before" "$GITHUB_SHA" -- "${image_inputs[@]}")
+            if [[ -z "$changed" ]]; then
+              echo "::notice::This push has no production image changes"
+              exit 0
+            fi
+
+            tip=$(git rev-parse --verify "refs/remotes/origin/$DEFAULT_BRANCH^{commit}")
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" "$tip"; then
+              echo "::error::The verified commit is outside the current default branch"
+              exit 1
+            fi
+
+            # Check history so a later change followed by a revert still supersedes this push.
+            newer=$(git rev-list --first-parent -1 "$GITHUB_SHA..$tip" -- "${image_inputs[@]}")
+            if [[ -n "$newer" ]]; then
+              echo "::notice::A newer production image change superseded this image build"
+              exit 0
+            fi
+          fi
+          echo 'publish=true' >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
+        if: steps.revision.outputs.publish == 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Generate image metadata
         id: meta
+        if: steps.revision.outputs.publish == 'true'
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
           labels: org.opencontainers.image.licenses=MIT
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=long,prefix=
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+            type=sha,format=long,prefix=,enable=${{ github.event_name == 'push' }}
+            type=sha,prefix=manual-,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Log in to GHCR
+        if: steps.revision.outputs.publish == 'true'
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
@@ -116,6 +183,7 @@ jobs:
 
       - name: Build and publish image
         id: image
+        if: steps.revision.outputs.publish == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -128,6 +196,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=garmin-daily
 
       - name: Report published digest
+        if: steps.revision.outputs.publish == 'true'
         env:
           DIGEST: ${{ steps.image.outputs.digest }}
         run: echo "$IMAGE@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
