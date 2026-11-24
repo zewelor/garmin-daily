@@ -2,7 +2,7 @@ name: GHCR cleanup
 
 on:
   schedule:
-    - cron: '17 3 * * 0'
+    - cron: '17 3 1 * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -37,9 +37,10 @@ jobs:
         uses: dataaxiom/ghcr-cleanup-action@ac45a8c04b1eb4b27974ca79a0a74f344c93664b # v1.3.0
         with:
           package: ${{ github.event.repository.name }}
+          older-than: 60 days
           keep-n-tagged: 10
-          keep-n-untagged: 10
           exclude-tags: latest
-          delete-partial-images: true
+          delete-partial-images: false
+          delete-untagged: true
           validate: true
           dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}

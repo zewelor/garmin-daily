@@ -122,8 +122,8 @@ container build and a container migration before publishing. See the
 `docker/metadata-action` generates tags and OCI source/revision labels. Publishing
 uses `GITHUB_TOKEN`; no separate registry secret is needed. The published digest
 appears in the job summary, and layer caching is enabled. The `GHCR cleanup`
-workflow runs on Sundays at 03:17 UTC and validates multi-architecture manifests.
-It retains 10 recent tagged and 10 untagged versions while protecting `latest`.
+workflow runs on the first of each month at 03:17 UTC and validates multi-architecture manifests.
+It protects `latest`, versions from the last 60 days and the 10 newest eligible older tagged versions.
 Older versions may be removed, so a commit tag is not a promise of indefinite
 retention. Manual runs on the default branch preview deletions by default. Clear
 the `dry_run` input to apply cleanup.
